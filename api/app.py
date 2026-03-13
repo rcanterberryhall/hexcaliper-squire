@@ -4,6 +4,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Optional
 
+import requests as http_requests
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -196,20 +197,20 @@ def health():
 @app.get("/settings")
 def get_settings():
     return {
-        "ollama_url":       config.OLLAMA_URL,
-        "ollama_model":     config.OLLAMA_MODEL,
-        "cf_client_id":     _mask(config.CF_CLIENT_ID),
-        "cf_client_secret": _mask(config.CF_CLIENT_SECRET),
-        "slack_bot_token":  _mask(config.SLACK_BOT_TOKEN),
-        "slack_channels":   ",".join(config.SLACK_CHANNELS),
-        "github_pat":       _mask(config.GITHUB_PAT),
-        "github_username":  config.GITHUB_USERNAME,
-        "jira_email":       config.JIRA_EMAIL,
-        "jira_token":       _mask(config.JIRA_TOKEN),
-        "jira_domain":      config.JIRA_DOMAIN,
-        "jira_jql":         config.JIRA_JQL,
-        "lookback_hours":   config.LOOKBACK_HOURS,
-        "warnings":         config.validate(),
+        "ollama_url":           config.OLLAMA_URL,
+        "ollama_model":         config.OLLAMA_MODEL,
+        "cf_client_id":         _mask(config.CF_CLIENT_ID),
+        "cf_client_secret":     _mask(config.CF_CLIENT_SECRET),
+        "slack_client_id":      config.SLACK_CLIENT_ID,
+        "slack_client_secret":  _mask(config.SLACK_CLIENT_SECRET),
+        "github_pat":           _mask(config.GITHUB_PAT),
+        "github_username":      config.GITHUB_USERNAME,
+        "jira_email":           config.JIRA_EMAIL,
+        "jira_token":           _mask(config.JIRA_TOKEN),
+        "jira_domain":          config.JIRA_DOMAIN,
+        "jira_jql":             config.JIRA_JQL,
+        "lookback_hours":       config.LOOKBACK_HOURS,
+        "warnings":             config.validate(),
     }
 
 
@@ -388,3 +389,102 @@ def get_stats():
         "by_category":   [{"category": k, "count": v} for k, v in by_category.items()],
         "last_scan":     logs[0] if logs else None,
     }
+
+
+# ── Slack OAuth ────────────────────────────────────────────────────────────────
+
+_SLACK_REDIRECT_URI  = "https://squire.hexcaliper.com/page/api/slack/callback"
+_SLACK_USER_SCOPES   = (
+    "channels:history,channels:read,groups:history,groups:read,"
+    "im:history,im:read,mpim:history,mpim:read,search:read,users:read"
+)
+
+
+@app.get("/slack/connect")
+def slack_connect():
+    if not config.SLACK_CLIENT_ID:
+        raise HTTPException(status_code=400, detail="SLACK_CLIENT_ID not configured — save it in Settings first.")
+    url = (
+        f"https://slack.com/oauth/v2/authorize"
+        f"?client_id={config.SLACK_CLIENT_ID}"
+        f"&user_scope={_SLACK_USER_SCOPES}"
+        f"&redirect_uri={_SLACK_REDIRECT_URI}"
+    )
+    return Response(status_code=302, headers={"Location": url})
+
+
+@app.get("/slack/callback")
+def slack_callback(code: str = None, error: str = None):
+    if error:
+        return Response(status_code=302, headers={"Location": f"/page/?slack_error={error}"})
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing OAuth code.")
+
+    r = http_requests.post(
+        "https://slack.com/api/oauth.v2.access",
+        data={
+            "client_id":     config.SLACK_CLIENT_ID,
+            "client_secret": config.SLACK_CLIENT_SECRET,
+            "code":          code,
+            "redirect_uri":  _SLACK_REDIRECT_URI,
+        },
+        timeout=15,
+    )
+    r.raise_for_status()
+    data = r.json()
+
+    if not data.get("ok"):
+        return Response(
+            status_code=302,
+            headers={"Location": f"/page/?slack_error={data.get('error', 'unknown')}"},
+        )
+
+    authed_user = data.get("authed_user", {})
+    token = authed_user.get("access_token")
+    if not token:
+        return Response(status_code=302, headers={"Location": "/page/?slack_error=no_user_token"})
+
+    team      = data.get("team", {})
+    workspace = {
+        "team":    team.get("name", "Unknown"),
+        "team_id": team.get("id", ""),
+        "token":   token,
+    }
+
+    with db_lock:
+        existing = settings_tbl.get(doc_id=1) or {}
+    tokens = [t for t in existing.get("slack_user_tokens", []) if t.get("team_id") != workspace["team_id"]]
+    tokens.append(workspace)
+    existing["slack_user_tokens"] = tokens
+
+    with db_lock:
+        if settings_tbl.get(doc_id=1):
+            settings_tbl.update(existing, doc_ids=[1])
+        else:
+            settings_tbl.insert(existing)
+
+    config.apply_overrides(existing)
+    return Response(status_code=302, headers={"Location": "/page/?slack_connected=1"})
+
+
+@app.get("/slack/workspaces")
+def get_slack_workspaces():
+    with db_lock:
+        existing = settings_tbl.get(doc_id=1) or {}
+    tokens = existing.get("slack_user_tokens", [])
+    return [{"team": t.get("team", "Unknown"), "team_id": t.get("team_id", "")} for t in tokens]
+
+
+@app.delete("/slack/workspaces/{team_id}")
+def disconnect_slack_workspace(team_id: str):
+    with db_lock:
+        existing = settings_tbl.get(doc_id=1) or {}
+    tokens = [t for t in existing.get("slack_user_tokens", []) if t.get("team_id") != team_id]
+    existing["slack_user_tokens"] = tokens
+    with db_lock:
+        if settings_tbl.get(doc_id=1):
+            settings_tbl.update(existing, doc_ids=[1])
+        else:
+            settings_tbl.insert(existing)
+    config.apply_overrides(existing)
+    return {"ok": True}

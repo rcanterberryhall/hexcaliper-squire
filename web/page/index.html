@@ -48,11 +48,19 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .wordmark-text { display: flex; flex-direction: column; gap: 1px; }
 .wordmark-main { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .wordmark-sub  { font-size: 8px; letter-spacing: .32em; color: var(--muted); font-weight: 600; }
+.status-pill {
+  display: flex; align-items: center; gap: 5px;
+  padding: 2px 8px 2px 6px; border: 1px solid rgba(212,160,23,.2);
+  border-radius: 20px; cursor: default;
+}
 .hb {
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--accent); box-shadow: 0 0 10px var(--accent);
-  animation: hbpulse 2.5s ease-in-out infinite;
+  animation: hbpulse 2.5s ease-in-out infinite; flex-shrink: 0;
 }
+.hb.scanning { animation: hbpulse .5s ease-in-out infinite; background: var(--accent); box-shadow: 0 0 14px var(--accent); }
+.hb.error    { animation: none; background: var(--red); box-shadow: 0 0 8px var(--red); }
+.status-word { font-family: var(--mono); font-size: 8px; letter-spacing: .16em; color: var(--muted); }
 @keyframes hbpulse { 0%,100%{opacity:1} 50%{opacity:.15;box-shadow:none} }
 .topbar-right { display: flex; align-items: center; gap: 10px; }
 .src-toggles  { display: flex; gap: 3px; }
@@ -149,7 +157,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 #todo-view::before, #items-view::before {
   content: '';
   position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-  background: url('squire-crest.svg') no-repeat center center;
+  background: url('/page/squire-crest.svg') no-repeat center center;
   background-size: min(55%, 280px);
   opacity: 0.09;
   pointer-events: none;
@@ -302,6 +310,18 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .settings-msg { font-size: 11px; }
 .settings-msg.ok  { color: var(--accent); }
 .settings-msg.err { color: var(--red); }
+.connect-btn {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .08em;
+  padding: 5px 12px; border: 1px solid var(--accent); color: var(--accent);
+  background: transparent; cursor: pointer; border-radius: var(--r); transition: all .15s;
+}
+.connect-btn:hover { background: var(--accent); color: var(--bg); }
+.workspace-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 5px 8px; margin-bottom: 3px; background: var(--border);
+  border-radius: var(--r); font-size: 11px;
+}
+.workspace-name { color: var(--text); }
 
 /* ── Status bar ── */
 .statusbar {
@@ -326,9 +346,15 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 
   <div class="topbar">
     <div class="wordmark">
-      <img src="squire-crest.svg" class="brand-icon" alt="Squire crest">
+      <img src="/page/squire-crest.svg" class="brand-icon" alt="Squire crest">
       <div class="wordmark-text">
-        <div class="wordmark-main"><div class="hb"></div>HEXCALIPER SQUIRE</div>
+        <div class="wordmark-main">
+          <div class="status-pill" title="System status">
+            <div class="hb" id="hbDot"></div>
+            <span class="status-word" id="statusWord">READY</span>
+          </div>
+          HEXCALIPER SQUIRE
+        </div>
         <div class="wordmark-sub">OPS DASHBOARD</div>
       </div>
     </div>
@@ -421,12 +447,13 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 
     <div class="settings-section">
       <div class="section-head"><div class="sdot2" id="dot-slack"></div>Slack</div>
-      <div class="field">
-        <label>Bot Token</label>
-        <input type="password" id="s-slack_bot_token" placeholder="xoxb-…">
-        <div class="field-hint">Requires: channels:history, channels:read, groups:history, groups:read, im:history, im:read, users:read</div>
+      <div class="field-row">
+        <div class="field"><label>Client ID</label><input type="text" id="s-slack_client_id" placeholder="your-app-client-id"></div>
+        <div class="field"><label>Client Secret</label><input type="password" id="s-slack_client_secret" placeholder="your-app-client-secret"></div>
       </div>
-      <div class="field"><label>Channels (optional — comma-separated, leave blank for all)</label><input type="text" id="s-slack_channels" placeholder="general, ops, alerts"></div>
+      <div class="field-hint" style="margin-bottom:10px">Create a private Slack app at api.slack.com, add user token scopes, set redirect URL to https://squire.hexcaliper.com/page/api/slack/callback, then connect each workspace below.</div>
+      <div id="slack-workspaces"></div>
+      <button class="connect-btn" onclick="connectSlack()">+ Connect Workspace</button>
     </div>
 
     <div class="settings-section">
@@ -463,6 +490,13 @@ let scanTimer  = null;
 let allTodos   = [];
 
 const $   = id => document.getElementById(id);
+
+function setStatus(state) {
+  const dot  = $('hbDot');
+  const word = $('statusWord');
+  dot.className = 'hb' + (state !== 'ready' ? ' ' + state : '');
+  word.textContent = state.toUpperCase();
+}
 const esc = s  => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const trunc   = (s, n) => s.length > n ? s.slice(0, n) + '…' : s;
 const fmtDate = iso => { try { return new Date(iso).toLocaleDateString([], {month:'short', day:'numeric'}); } catch { return iso; }};
@@ -488,8 +522,9 @@ async function startScan() {
     await api('/scan', 'POST', { sources: [...activeSrcs] });
     $('scanBtn').disabled = true;
     $('spin').classList.add('on');
+    setStatus('scanning');
     scanTimer = setInterval(pollScan, 1000);
-  } catch (e) { $('statusMsg').textContent = `Scan failed: ${e.message}`; }
+  } catch (e) { setStatus('error'); $('statusMsg').textContent = `Scan failed: ${e.message}`; }
 }
 
 async function pollScan() {
@@ -502,6 +537,7 @@ async function pollScan() {
       clearInterval(scanTimer);
       $('scanBtn').disabled = false;
       $('spin').classList.remove('on');
+      setStatus('ready');
       setTimeout(() => { $('pbar').style.width = '0'; }, 2000);
       await Promise.all([loadStats(), loadTodos(), loadItems()]);
     }
@@ -660,7 +696,8 @@ function setView(v, el) {
 
 const SETTINGS_FIELDS = [
   'ollama_url','ollama_model','cf_client_id','cf_client_secret',
-  'slack_bot_token','slack_channels','github_pat','github_username',
+  'slack_client_id','slack_client_secret',
+  'github_pat','github_username',
   'jira_email','jira_token','jira_domain','jira_jql','lookback_hours',
 ];
 
@@ -680,7 +717,37 @@ async function loadSettings() {
     const s = await api('/settings');
     SETTINGS_FIELDS.forEach(f => { const el = $('s-' + f); if (el) el.value = s[f] ?? ''; });
     updateSectionDots(s.warnings || []);
+    loadSlackWorkspaces();
   } catch(e) { console.warn('loadSettings:', e); }
+}
+
+async function loadSlackWorkspaces() {
+  try {
+    const ws  = await api('/slack/workspaces');
+    const el  = $('slack-workspaces');
+    if (!ws.length) {
+      el.innerHTML = '<div class="field-hint" style="margin-bottom:8px">No workspaces connected yet.</div>';
+      return;
+    }
+    el.innerHTML = ws.map(w => `
+      <div class="workspace-row">
+        <span class="workspace-name">✓ ${esc(w.team)}</span>
+        <button class="ia del" onclick="disconnectSlack('${esc(w.team_id)}')">✕ Disconnect</button>
+      </div>`).join('');
+  } catch(e) { console.warn('loadSlackWorkspaces:', e); }
+}
+
+async function disconnectSlack(teamId) {
+  try { await api('/slack/workspaces/' + teamId, 'DELETE'); loadSlackWorkspaces(); }
+  catch(e) { console.warn('disconnectSlack:', e); }
+}
+
+async function connectSlack() {
+  // Persist client ID/secret first so the callback endpoint can use them
+  const body = {};
+  SETTINGS_FIELDS.forEach(f => { const el = $('s-' + f); if (el) body[f] = el.value; });
+  try { await api('/settings', 'POST', body); } catch(e) {}
+  window.location.href = '/page/api/slack/connect';
 }
 
 function updateSectionDots(warnings) {
@@ -711,6 +778,20 @@ async function saveSettings() {
 
 loadStats();
 loadTodos();
+
+// Handle Slack OAuth redirect result
+(function() {
+  const p = new URLSearchParams(window.location.search);
+  if (p.get('slack_connected')) {
+    history.replaceState({}, '', '/page/');
+    $('statusMsg').textContent = 'Slack workspace connected.';
+    openSettings();
+  } else if (p.get('slack_error')) {
+    history.replaceState({}, '', '/page/');
+    $('statusMsg').textContent = 'Slack connect failed: ' + p.get('slack_error');
+    openSettings();
+  }
+})();
 </script>
 </body>
 </html>

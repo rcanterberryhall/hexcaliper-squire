@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hexcaliper Squire</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:      #0a0c0b;
+  --surface: #0f1210;
+  --border:  #171d18;
+  --border2: #202820;
+  --text:    #b8ccba;
+  --muted:   #4a5e4c;
+  --accent:  #3dff70;
+  --amber:   #ffb020;
+  --red:     #ff4040;
+  --blue:    #40b8ff;
+  --purple:  #a060ff;
+  --mono:    'JetBrains Mono', monospace;
+  --display: 'Syne', sans-serif;
+  --r:       2px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body { background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 13px; }
+
+.shell { display: grid; grid-template-rows: 48px 2px 1fr 26px; height: 100vh; }
+
+/* ── Topbar ── */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 20px; border-bottom: 1px solid var(--border2); background: var(--surface);
+}
+.wordmark {
+  font-family: var(--display); font-size: 13px; font-weight: 800;
+  letter-spacing: .18em; color: var(--accent); display: flex; align-items: center; gap: 9px;
+}
+.hb {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 10px var(--accent);
+  animation: hbpulse 2.5s ease-in-out infinite;
+}
+@keyframes hbpulse { 0%,100%{opacity:1} 50%{opacity:.15;box-shadow:none} }
+.topbar-right { display: flex; align-items: center; gap: 10px; }
+.src-toggles  { display: flex; gap: 3px; }
+.src-btn {
+  font-family: var(--mono); font-size: 10px; font-weight: 500; letter-spacing: .08em;
+  text-transform: uppercase; padding: 4px 10px; border-radius: var(--r);
+  cursor: pointer; border: 1px solid var(--border2); background: transparent;
+  color: var(--muted); transition: all .15s;
+}
+.src-btn.on-outlook { border-color: var(--blue);   color: var(--blue);   background: rgba(64,184,255,.08); }
+.src-btn.on-slack   { border-color: var(--purple); color: var(--purple); background: rgba(160,96,255,.08); }
+.src-btn.on-github  { border-color: var(--text);   color: var(--text);   background: rgba(184,204,186,.06); }
+.src-btn.on-jira    { border-color: var(--amber);  color: var(--amber);  background: rgba(255,176,32,.08); }
+.scan-btn {
+  font-family: var(--display); font-size: 11px; font-weight: 700; letter-spacing: .12em;
+  text-transform: uppercase; padding: 6px 16px; border: 1px solid var(--accent);
+  background: transparent; color: var(--accent); cursor: pointer; border-radius: var(--r);
+  transition: all .15s;
+}
+.scan-btn:hover    { background: var(--accent); color: var(--bg); }
+.scan-btn:disabled { opacity: .3; cursor: not-allowed; }
+.scan-btn:disabled:hover { background: transparent; color: var(--accent); }
+
+/* ── Progress ── */
+.progress-track { background: var(--border); }
+.progress-fill  { height: 2px; background: var(--accent); box-shadow: 0 0 8px var(--accent); transition: width .4s ease; width: 0; }
+
+/* ── Body ── */
+.body { display: grid; grid-template-columns: 216px 1fr; overflow: hidden; }
+
+/* ── Sidebar ── */
+.sidebar { border-right: 1px solid var(--border2); background: var(--surface); overflow-y: auto; padding: 16px 0; }
+.sb-block { padding: 0 12px 16px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+.sb-block:last-child { border-bottom: none; }
+.sb-label { font-size: 9px; letter-spacing: .22em; color: var(--muted); text-transform: uppercase; margin-bottom: 10px; padding: 0 4px; }
+.stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.stat      { background: var(--border); border: 1px solid var(--border2); border-radius: var(--r); padding: 8px 10px; }
+.stat-val  { font-family: var(--display); font-size: 21px; font-weight: 700; line-height: 1; }
+.stat-lbl  { font-size: 9px; color: var(--muted); margin-top: 3px; letter-spacing: .04em; }
+.c-accent { color: var(--accent); }
+.c-amber  { color: var(--amber); }
+.c-red    { color: var(--red); }
+.c-blue   { color: var(--blue); }
+.frow {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 14px; cursor: pointer; border-left: 2px solid transparent; transition: all .1s;
+}
+.frow:hover  { background: var(--border); color: var(--text); }
+.frow.active { border-left-color: var(--accent); background: rgba(61,255,112,.04); color: var(--accent); }
+.frow .fl { font-size: 12px; }
+.frow .fc { font-size: 10px; background: var(--border2); padding: 1px 6px; border-radius: 8px; color: var(--muted); }
+.frow.active .fc { color: var(--accent); }
+.srow {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 14px; cursor: pointer; border-left: 2px solid transparent; transition: all .1s;
+}
+.srow:hover { background: var(--border); }
+.srow.active-all     { border-left-color: var(--accent); }
+.srow.active-outlook { border-left-color: var(--blue); }
+.srow.active-slack   { border-left-color: var(--purple); }
+.srow.active-github  { border-left-color: var(--text); }
+.srow.active-jira    { border-left-color: var(--amber); }
+.sdot         { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.sdot-all     { background: var(--accent); }
+.sdot-outlook { background: var(--blue); }
+.sdot-slack   { background: var(--purple); }
+.sdot-github  { background: var(--text); }
+.sdot-jira    { background: var(--amber); }
+.sc           { font-size: 11px; margin-left: auto; color: var(--muted); }
+
+/* ── Main ── */
+.main { display: flex; flex-direction: column; overflow: hidden; }
+.main-toolbar {
+  padding: 9px 18px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--surface); flex-shrink: 0;
+}
+.vtabs { display: flex; gap: 1px; }
+.vtab  {
+  font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+  padding: 5px 14px; background: none; border: 1px solid var(--border2);
+  color: var(--muted); cursor: pointer; transition: all .1s; font-family: var(--mono);
+}
+.vtab:hover  { color: var(--text); }
+.vtab.active { background: var(--border2); color: var(--accent); border-color: var(--accent); }
+.show-done { display: flex; align-items: center; gap: 5px; cursor: pointer; font-size: 11px; color: var(--muted); }
+.show-done input { accent-color: var(--accent); }
+
+/* ── Views ── */
+#todo-view  { flex: 1; overflow-y: auto; padding: 12px 18px; }
+#items-view { flex: 1; overflow-y: auto; padding: 12px 18px; display: none; }
+
+/* ── Todo groups ── */
+.group-label {
+  font-size: 9px; letter-spacing: .2em; color: var(--muted); text-transform: uppercase;
+  padding: 10px 0 6px; border-bottom: 1px solid var(--border);
+  margin-bottom: 6px; display: flex; align-items: center; gap: 7px;
+}
+.gdot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+.g-high   .gdot { background: var(--red);   box-shadow: 0 0 5px var(--red); }
+.g-medium .gdot { background: var(--amber); }
+.g-low    .gdot { background: var(--muted); }
+
+/* ── Todo cards ── */
+.todo {
+  display: grid; grid-template-columns: 18px 1fr auto; gap: 10px; align-items: start;
+  padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--r);
+  margin-bottom: 5px; background: var(--surface);
+  transition: border-color .15s, transform .1s;
+  animation: fadein .2s ease;
+}
+@keyframes fadein { from { opacity:0; transform:translateY(3px) } to { opacity:1; transform:none } }
+.todo:hover { border-color: var(--border2); transform: translateX(1px); }
+.todo.done  { opacity: .3; }
+.cb {
+  width: 16px; height: 16px; border: 1px solid var(--border2); border-radius: var(--r);
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  font-size: 10px; color: transparent; background: none; flex-shrink: 0; margin-top: 1px;
+  transition: all .1s;
+}
+.cb:hover           { border-color: var(--accent); color: var(--accent); }
+.todo.done .cb      { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.todo-desc { font-size: 12px; line-height: 1.4; margin-bottom: 4px; color: var(--text); }
+.todo.done .todo-desc { text-decoration: line-through; color: var(--muted); }
+.todo-meta { display: flex; gap: 10px; flex-wrap: wrap; font-size: 10px; color: var(--muted); }
+.chip          { display: inline-flex; align-items: center; gap: 3px; }
+.chip-outlook  { color: var(--blue); }
+.chip-slack    { color: var(--purple); }
+.chip-github   { color: var(--text); }
+.chip-jira     { color: var(--amber); }
+.chip-deadline { color: var(--red); }
+.todo-actions { display: flex; gap: 3px; flex-shrink: 0; }
+.ia {
+  background: none; border: 1px solid transparent; color: var(--muted);
+  cursor: pointer; padding: 2px 5px; font-size: 11px; border-radius: var(--r);
+  transition: all .1s; font-family: var(--mono);
+}
+.ia.del:hover  { border-color: var(--red);  color: var(--red); }
+.ia.open:hover { border-color: var(--blue); color: var(--blue); }
+
+/* ── Items table ── */
+.item-table { width: 100%; border-collapse: collapse; }
+.item-table th {
+  font-size: 9px; letter-spacing: .15em; color: var(--muted); text-transform: uppercase;
+  padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border2); font-weight: 400;
+}
+.item-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.item-table tr:hover td { background: var(--surface); }
+.badge { font-size: 9px; padding: 2px 6px; border-radius: var(--r); letter-spacing: .05em; text-transform: uppercase; display: inline-block; }
+.b-outlook       { background: rgba(64,184,255,.1);  color: var(--blue);   border: 1px solid rgba(64,184,255,.2); }
+.b-slack         { background: rgba(160,96,255,.1);  color: var(--purple); border: 1px solid rgba(160,96,255,.2); }
+.b-github        { background: rgba(184,204,186,.07);color: var(--text);   border: 1px solid var(--border2); }
+.b-jira          { background: rgba(255,176,32,.08); color: var(--amber);  border: 1px solid rgba(255,176,32,.2); }
+.b-reply_needed  { color: var(--red);    background: rgba(255,64,64,.1);   border: 1px solid rgba(255,64,64,.2); }
+.b-task          { color: var(--accent); background: rgba(61,255,112,.07); border: 1px solid rgba(61,255,112,.15); }
+.b-deadline      { color: var(--amber);  background: rgba(255,176,32,.07); border: 1px solid rgba(255,176,32,.15); }
+.b-review        { color: var(--blue);   background: rgba(64,184,255,.07); border: 1px solid rgba(64,184,255,.15); }
+.b-approval      { color: var(--purple); background: rgba(160,96,255,.07); border: 1px solid rgba(160,96,255,.15); }
+.b-fyi, .b-noise { color: var(--muted);  background: rgba(74,94,76,.12);   border: 1px solid var(--border); }
+.pri-high   { color: var(--red);   font-size: 10px; }
+.pri-medium { color: var(--amber); font-size: 10px; }
+.pri-low    { color: var(--muted); font-size: 10px; }
+.t-title  { max-width: 300px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; }
+.t-author { color: var(--muted); font-size: 11px; max-width: 120px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.t-sum    { color: var(--muted); font-size: 11px; max-width: 260px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.t-time   { font-size: 10px; color: var(--muted); white-space: nowrap; }
+.t-link a { color: var(--blue); text-decoration: none; font-size: 11px; }
+.t-link a:hover { text-decoration: underline; }
+
+/* ── Empty state ── */
+.empty      { text-align: center; padding: 60px 20px; color: var(--muted); }
+.empty-icon { font-size: 32px; opacity: .2; margin-bottom: 10px; }
+.empty-msg  { font-size: 11px; line-height: 2.2; letter-spacing: .04em; white-space: pre-line; }
+
+/* ── Status bar ── */
+.statusbar {
+  border-top: 1px solid var(--border2); background: var(--surface);
+  display: flex; align-items: center; padding: 0 16px; gap: 9px;
+  font-size: 11px; color: var(--muted);
+}
+.spinner {
+  width: 9px; height: 9px; border: 1.5px solid var(--border2);
+  border-top-color: var(--accent); border-radius: 50%;
+  animation: spin .65s linear infinite; display: none; flex-shrink: 0;
+}
+.spinner.on { display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg) } }
+::-webkit-scrollbar       { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <div class="topbar">
+    <div class="wordmark"><div class="hb"></div>HEXCALIPER SQUIRE</div>
+    <div class="topbar-right">
+      <div class="src-toggles">
+        <button class="src-btn on-outlook" data-src="outlook" onclick="toggleSrc(this)">Outlook</button>
+        <button class="src-btn on-slack"   data-src="slack"   onclick="toggleSrc(this)">Slack</button>
+        <button class="src-btn on-github"  data-src="github"  onclick="toggleSrc(this)">GitHub</button>
+        <button class="src-btn on-jira"    data-src="jira"    onclick="toggleSrc(this)">Jira</button>
+      </div>
+      <button class="scan-btn" id="scanBtn" onclick="startScan()">▶ Scan</button>
+    </div>
+  </div>
+
+  <div class="progress-track"><div class="progress-fill" id="pbar"></div></div>
+
+  <div class="body">
+    <aside class="sidebar">
+
+      <div class="sb-block">
+        <div class="sb-label">Overview</div>
+        <div class="stat-grid">
+          <div class="stat"><div class="stat-val c-accent" id="st-total">—</div><div class="stat-lbl">Items</div></div>
+          <div class="stat"><div class="stat-val c-amber"  id="st-open">—</div><div class="stat-lbl">Open</div></div>
+          <div class="stat"><div class="stat-val c-red"    id="st-high">—</div><div class="stat-lbl">High Pri</div></div>
+          <div class="stat"><div class="stat-val c-blue"   id="st-scan">—</div><div class="stat-lbl">Last Scan</div></div>
+        </div>
+      </div>
+
+      <div class="sb-block">
+        <div class="sb-label">Priority</div>
+        <div class="frow active" onclick="setPri('all',this)">   <span class="fl">All</span>    <span class="fc" id="fc-all">0</span></div>
+        <div class="frow"        onclick="setPri('high',this)">  <span class="fl">● High</span>  <span class="fc" id="fc-high">0</span></div>
+        <div class="frow"        onclick="setPri('medium',this)"><span class="fl">● Medium</span><span class="fc" id="fc-medium">0</span></div>
+        <div class="frow"        onclick="setPri('low',this)">   <span class="fl">● Low</span>   <span class="fc" id="fc-low">0</span></div>
+      </div>
+
+      <div class="sb-block">
+        <div class="sb-label">Source</div>
+        <div class="srow active-all" onclick="setSrc('all',this)">    <div class="sdot sdot-all"></div>    <span style="font-size:12px">All</span>     <span class="sc" id="sc-all">0</span></div>
+        <div class="srow"            onclick="setSrc('outlook',this)"><div class="sdot sdot-outlook"></div><span style="font-size:12px">Outlook</span><span class="sc" id="sc-outlook">0</span></div>
+        <div class="srow"            onclick="setSrc('slack',this)">  <div class="sdot sdot-slack"></div>  <span style="font-size:12px">Slack</span>  <span class="sc" id="sc-slack">0</span></div>
+        <div class="srow"            onclick="setSrc('github',this)"> <div class="sdot sdot-github"></div> <span style="font-size:12px">GitHub</span> <span class="sc" id="sc-github">0</span></div>
+        <div class="srow"            onclick="setSrc('jira',this)">   <div class="sdot sdot-jira"></div>   <span style="font-size:12px">Jira</span>   <span class="sc" id="sc-jira">0</span></div>
+      </div>
+
+    </aside>
+
+    <div class="main">
+      <div class="main-toolbar">
+        <div class="vtabs">
+          <button class="vtab active" onclick="setView('todos',this)">Action Items</button>
+          <button class="vtab"        onclick="setView('items',this)">All Items</button>
+        </div>
+        <label class="show-done"><input type="checkbox" id="showDone" onchange="loadTodos()"> Show completed</label>
+      </div>
+      <div id="todo-view"></div>
+      <div id="items-view"></div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <div class="spinner" id="spin"></div>
+    <span id="statusMsg">Ready — configure docker-compose.yml then click Scan</span>
+  </div>
+
+</div>
+<script>
+const API = '/page/api';
+let activeSrcs = new Set(['outlook','slack','github','jira']);
+let priFilter  = 'all';
+let srcFilter  = 'all';
+let scanTimer  = null;
+let allTodos   = [];
+
+const $   = id => document.getElementById(id);
+const esc = s  => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const trunc   = (s, n) => s.length > n ? s.slice(0, n) + '…' : s;
+const fmtDate = iso => { try { return new Date(iso).toLocaleDateString([], {month:'short', day:'numeric'}); } catch { return iso; }};
+const fmtTime = iso => { try { return new Date(iso).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); } catch { return iso; }};
+
+async function api(path, method = 'GET', body = null) {
+  const opts = { method, headers: {'Content-Type': 'application/json'} };
+  if (body !== null) opts.body = JSON.stringify(body);
+  const r = await fetch(API + path, opts);
+  if (!r.ok) throw new Error(`${method} ${path} → ${r.status}`);
+  return r.json();
+}
+
+function toggleSrc(btn) {
+  const s = btn.dataset.src;
+  if (activeSrcs.has(s)) { activeSrcs.delete(s); btn.className = 'src-btn'; }
+  else { activeSrcs.add(s); btn.className = `src-btn on-${s}`; }
+}
+
+async function startScan() {
+  if (!activeSrcs.size) return;
+  try {
+    await api('/scan', 'POST', { sources: [...activeSrcs] });
+    $('scanBtn').disabled = true;
+    $('spin').classList.add('on');
+    scanTimer = setInterval(pollScan, 1000);
+  } catch (e) { $('statusMsg').textContent = `Scan failed: ${e.message}`; }
+}
+
+async function pollScan() {
+  try {
+    const s   = await api('/scan/status');
+    const pct = s.total > 0 ? (s.progress / s.total * 100) : (s.running ? 25 : 100);
+    $('pbar').style.width      = pct + '%';
+    $('statusMsg').textContent = s.message;
+    if (!s.running) {
+      clearInterval(scanTimer);
+      $('scanBtn').disabled = false;
+      $('spin').classList.remove('on');
+      setTimeout(() => { $('pbar').style.width = '0'; }, 2000);
+      await Promise.all([loadStats(), loadTodos(), loadItems()]);
+    }
+  } catch (e) { /* keep polling */ }
+}
+
+async function loadStats() {
+  try {
+    const s = await api('/stats');
+    $('st-total').textContent = s.total_items;
+    $('st-open').textContent  = s.open_todos;
+    $('st-high').textContent  = s.high_priority;
+    if (s.last_scan?.finished_at) $('st-scan').textContent = fmtTime(s.last_scan.finished_at);
+    const sm = {};
+    (s.by_source || []).forEach(r => sm[r.source] = r.count);
+    $('sc-all').textContent     = Object.values(sm).reduce((a,b) => a+b, 0);
+    $('sc-outlook').textContent = sm.outlook || 0;
+    $('sc-slack').textContent   = sm.slack   || 0;
+    $('sc-github').textContent  = sm.github  || 0;
+    $('sc-jira').textContent    = sm.jira    || 0;
+  } catch (e) { console.warn('stats:', e); }
+}
+
+async function loadTodos() {
+  try {
+    const p = new URLSearchParams({ done: $('showDone').checked });
+    if (priFilter !== 'all') p.set('priority', priFilter);
+    if (srcFilter !== 'all') p.set('source',   srcFilter);
+    allTodos = await api('/todos?' + p);
+    renderTodos(allTodos);
+    updateCounts(allTodos);
+  } catch (e) { console.warn('todos:', e); }
+}
+
+function updateCounts(todos) {
+  const c = { all: todos.length, high: 0, medium: 0, low: 0 };
+  todos.forEach(t => { if (c[t.priority] !== undefined) c[t.priority]++; });
+  Object.entries(c).forEach(([k, v]) => { const el = $('fc-' + k); if (el) el.textContent = v; });
+}
+
+function renderTodos(todos) {
+  const el = $('todo-view');
+  if (!todos.length) {
+    el.innerHTML = `<div class="empty"><div class="empty-icon">◻</div><div class="empty-msg">${
+      allTodos.length === 0
+        ? 'No action items yet.\nRun a scan to analyze your sources.'
+        : 'Nothing matches this filter.'
+    }</div></div>`;
+    return;
+  }
+  const groups = { high: [], medium: [], low: [] };
+  todos.forEach(t => (groups[t.priority] || groups.low).push(t));
+  const labels = { high: 'High Priority', medium: 'Medium Priority', low: 'Low Priority' };
+  el.innerHTML = '';
+  ['high','medium','low'].forEach(p => {
+    if (!groups[p].length) return;
+    const g = document.createElement('div');
+    g.className = `g-${p}`;
+    g.innerHTML = `<div class="group-label"><div class="gdot"></div>${labels[p]} (${groups[p].length})</div>`;
+    groups[p].forEach(t => g.appendChild(makeTodo(t)));
+    el.appendChild(g);
+  });
+}
+
+const srcIcon = { outlook: '✉', slack: '#', github: '⎇', jira: '◈' };
+
+function makeTodo(t) {
+  const el  = document.createElement('div');
+  el.className = `todo${t.done ? ' done' : ''}`;
+  const did  = t.doc_id || 0;
+  const dl   = t.deadline ? `<span class="chip chip-deadline">⚑ ${fmtDate(t.deadline)}</span>` : '';
+  const own  = t.owner && t.owner !== 'me' ? `<span class="chip">→ ${esc(t.owner)}</span>` : '';
+  const link = t.url ? `<button class="ia open" onclick="window.open('${esc(t.url)}','_blank')" title="Open source">↗</button>` : '';
+  el.innerHTML = `
+    <button class="cb" onclick="toggleDone(${did}, ${!t.done})">✓</button>
+    <div>
+      <div class="todo-desc">${esc(t.description)}</div>
+      <div class="todo-meta">
+        <span class="chip chip-${t.source}">${srcIcon[t.source] || '·'} ${t.source}</span>
+        <span class="chip" style="color:var(--muted)">${esc(trunc(t.title || '', 42))}</span>
+        ${dl}${own}
+      </div>
+    </div>
+    <div class="todo-actions">${link}<button class="ia del" onclick="deleteTodo(${did})" title="Delete">✕</button></div>`;
+  return el;
+}
+
+async function toggleDone(id, done) {
+  try { await api(`/todos/${id}`, 'PATCH', { done }); loadTodos(); loadStats(); }
+  catch (e) { console.warn('toggleDone:', e); }
+}
+
+async function deleteTodo(id) {
+  try { await api(`/todos/${id}`, 'DELETE'); loadTodos(); loadStats(); }
+  catch (e) { console.warn('deleteTodo:', e); }
+}
+
+async function loadItems() {
+  try {
+    const items = await api('/analyses');
+    const el    = $('items-view');
+    if (!items.length) {
+      el.innerHTML = `<div class="empty"><div class="empty-icon">◻</div><div class="empty-msg">No items scanned yet.</div></div>`;
+      return;
+    }
+    el.innerHTML = `
+      <table class="item-table">
+        <thead><tr>
+          <th>Source</th><th>Category</th><th>Title</th>
+          <th>From</th><th>Summary</th><th>Pri</th><th>Time</th><th>Link</th>
+        </tr></thead>
+        <tbody>${items.map(itemRow).join('')}</tbody>
+      </table>`;
+  } catch (e) { console.warn('items:', e); }
+}
+
+function itemRow(i) {
+  const t    = i.timestamp ? new Date(i.timestamp).toLocaleDateString([], {month:'short', day:'numeric'}) : '';
+  const link = i.url ? `<a href="${esc(i.url)}" target="_blank">↗</a>` : '—';
+  const cat  = (i.category || 'fyi').replace('_', ' ');
+  return `<tr>
+    <td><span class="badge b-${i.source}">${i.source}</span></td>
+    <td><span class="badge b-${i.category || 'fyi'}">${cat}</span></td>
+    <td class="t-title">${esc(i.title || '')}</td>
+    <td class="t-author">${esc(i.author || '')}</td>
+    <td class="t-sum">${esc(i.summary || '')}</td>
+    <td class="pri-${i.priority || 'low'}">${i.priority || 'low'}</td>
+    <td class="t-time">${t}</td>
+    <td class="t-link">${link}</td>
+  </tr>`;
+}
+
+function setPri(f, el) {
+  priFilter = f;
+  document.querySelectorAll('.frow').forEach(e => e.classList.remove('active'));
+  el.classList.add('active');
+  loadTodos();
+}
+
+function setSrc(s, el) {
+  srcFilter = s;
+  document.querySelectorAll('.srow').forEach(e => { e.className = 'srow'; });
+  el.classList.add(`active-${s}`);
+  loadTodos();
+}
+
+function setView(v, el) {
+  document.querySelectorAll('.vtab').forEach(e => e.classList.remove('active'));
+  el.classList.add('active');
+  $('todo-view').style.display  = v === 'todos' ? 'block' : 'none';
+  $('items-view').style.display = v === 'items' ? 'block' : 'none';
+  if (v === 'items') loadItems();
+}
+
+loadStats();
+loadTodos();
+</script>
+</body>
+</html>

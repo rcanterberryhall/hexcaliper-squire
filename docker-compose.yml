@@ -1,0 +1,42 @@
+services:
+
+  page-nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8082:8082"
+    volumes:
+      - ./nginx/page.conf:/etc/nginx/conf.d/page.conf:ro
+      - ./web:/usr/share/nginx/html:ro
+    depends_on:
+      - page-api
+    restart: unless-stopped
+    networks:
+      - app
+
+  page-api:
+    build: ./api
+    environment:
+      OLLAMA_URL:       "https://ollama.hexcaliper.com/api/generate"
+      OLLAMA_MODEL:     "llama3.2"
+      CF_CLIENT_ID:     "your-client-id.access"
+      CF_CLIENT_SECRET: "your-client-secret"
+      SLACK_BOT_TOKEN:  "xoxb-your-token"
+      SLACK_CHANNELS:   ""
+      GITHUB_PAT:       "ghp_your-token"
+      GITHUB_USERNAME:  "your-github-username"
+      JIRA_EMAIL:       "you@yourcompany.com"
+      JIRA_TOKEN:       "your-jira-api-token"
+      JIRA_DOMAIN:      "yourcompany.atlassian.net"
+      JIRA_JQL:         "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
+      PAGE_API_PORT:    "8001"
+      DB_PATH:          "/app/data/page.db"
+      LOOKBACK_HOURS:   "48"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    networks:
+      - app
+
+networks:
+  app:
+    driver: bridge

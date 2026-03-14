@@ -1,3 +1,17 @@
+"""
+app.py — Hexcaliper Squire FastAPI application.
+
+Exposes the REST API consumed by the frontend and the host sidecar scripts.
+Key responsibilities:
+
+- Receiving and deduplicating raw items via ``POST /ingest`` (sidecar path).
+- Orchestrating multi-source scans via ``POST /scan`` (frontend path).
+- Persisting ``Analysis`` and ``Todo`` records to TinyDB.
+- Serving settings, stats, and Slack OAuth endpoints to the frontend.
+
+All AI analysis is performed asynchronously via ``agent.analyze`` so that
+HTTP responses are returned immediately and the UI polls for results.
+"""
 import json
 import os
 import threading

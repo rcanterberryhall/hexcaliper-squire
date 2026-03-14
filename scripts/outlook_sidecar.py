@@ -1,11 +1,18 @@
 """
-Hexcaliper Squire — Outlook Sidecar (Windows)
-============================================
-Reads recent emails from the local Outlook client via win32com and
-POSTs them to the Squire API. Run on the Windows host alongside the
-Docker stack.
+outlook_sidecar.py — Outlook email ingestion sidecar (Windows).
 
-Usage:
+Reads recent emails from the local Outlook client via ``win32com`` and
+POSTs them to the Squire ``/ingest`` endpoint.  Intended to run on the
+Windows host machine where Outlook is installed; the Squire Docker stack
+does not have access to ``win32com`` and relies on this script to supply
+email data.
+
+Cloudflare Access service token headers are included on every request so
+that the ``/ingest`` endpoint is reachable through the CF Access policy
+protecting ``squire.hexcaliper.com``.
+
+Usage::
+
     pip install requests pywin32
     python outlook_sidecar.py
 
@@ -24,6 +31,17 @@ MAX_EMAILS            = 75
 
 
 def fetch() -> list[dict]:
+    """
+    Connect to the local Outlook client and fetch recent emails.
+
+    Uses ``win32com.client`` to access the MAPI namespace and retrieve
+    messages from the default Inbox.  Messages are filtered to the lookback
+    window defined by ``LOOKBACK_HOURS`` and capped at ``MAX_EMAILS``.
+
+    :return: List of normalised email dicts ready for ``POST /ingest``.
+    :rtype: list[dict]
+    :raises SystemExit: If ``pywin32`` is not installed or Outlook is not running.
+    """
     try:
         import pythoncom
         import win32com.client
@@ -97,6 +115,18 @@ def fetch() -> list[dict]:
     finally:
         pythoncom.CoUninitialize()
 def post(items: list[dict]) -> None:
+    """
+    POST fetched email items to the Squire ``/ingest`` endpoint.
+
+    Includes Cloudflare Access service token headers so requests pass
+    through the CF Access policy protecting ``squire.hexcaliper.com``.
+    The API deduplicates by ``item_id`` and queues new items for AI
+    analysis in the background.
+
+    :param items: List of email dicts as returned by ``fetch()``.
+    :type items: list[dict]
+    :raises SystemExit: If the API is unreachable or returns an error.
+    """
     if not items:
         print("No emails found in lookback window.")
         return

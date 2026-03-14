@@ -1,8 +1,22 @@
+"""
+agent.py — LLM-powered analysis pipeline.
+
+Sends each ``RawItem`` to an Ollama-compatible endpoint and parses the
+structured JSON response into an ``Analysis`` object.  The prompt is
+designed to extract action items, priority, category, and a one-sentence
+summary from any source (email, Slack, GitHub, Jira).
+
+Temperature is kept low (0.1) to favour deterministic, structured output.
+"""
 import json
 import requests
 from models import RawItem, Analysis, ActionItem
 import config
 
+# ── Prompt template ───────────────────────────────────────────────────────────
+
+# Sent verbatim to the LLM for every item.  Curly-brace fields are filled
+# by str.format() in analyze().
 PROMPT = """You are a personal ops assistant. Analyze this item and extract any action required from the recipient.
 
 Source: {source}
@@ -51,7 +65,20 @@ Rules:
 
 
 def analyze(item: RawItem) -> Analysis:
-    """Send a single item to Ollama and parse the structured response."""
+    """
+    Send a single item to Ollama and parse the structured JSON response.
+
+    If the LLM returns malformed JSON, all fields default to safe fallback
+    values so the item is still persisted rather than silently dropped.
+    Jira items without action items receive an automatic fallback action so
+    open tickets are always surfaced.
+
+    :param item: The raw item to analyse.
+    :type item: RawItem
+    :return: Structured analysis result.
+    :rtype: Analysis
+    :raises requests.HTTPError: If the Ollama API request fails.
+    """
     response = requests.post(
         config.OLLAMA_URL,
         headers=config.ollama_headers(),
@@ -87,7 +114,7 @@ def analyze(item: RawItem) -> Analysis:
         if a.get("description")
     ]
 
-    # Jira fallback — always surface open tickets even if LLM returns sparse output
+    # Jira fallback — always surface open tickets even if the LLM returns sparse output.
     if item.source == "jira" and not action_items:
         action_items = [ActionItem(
             description = f"Work on: {item.title}",
@@ -112,7 +139,21 @@ def analyze(item: RawItem) -> Analysis:
 
 
 def analyze_batch(items: list[RawItem], progress_cb=None) -> list[Analysis]:
-    """Analyze a list of items, calling progress_cb(i, total, source, title) after each."""
+    """
+    Analyse a list of items sequentially, with optional progress reporting.
+
+    Failed items are logged and skipped rather than aborting the batch, so a
+    single Ollama timeout does not prevent the remaining items from being
+    processed.
+
+    :param items: List of raw items to analyse.
+    :type items: list[RawItem]
+    :param progress_cb: Optional callback invoked after each item with the
+                        signature ``(index, total, source, title)``.
+    :type progress_cb: callable, optional
+    :return: List of analysis results for all successfully processed items.
+    :rtype: list[Analysis]
+    """
     results = []
     for i, item in enumerate(items):
         if progress_cb:

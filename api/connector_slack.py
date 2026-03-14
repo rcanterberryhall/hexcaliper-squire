@@ -1,12 +1,37 @@
+"""
+connector_slack.py — Slack data connector.
+
+Fetches @mentions, direct messages, and active channel threads for all
+connected workspaces using per-user OAuth tokens.  Falls back to a legacy
+bot token if no user tokens are configured.
+
+Each call to ``fetch()`` returns a deduplicated list of ``RawItem`` objects
+covering the lookback window defined in ``config.LOOKBACK_HOURS``.
+"""
 import requests
 from datetime import datetime, timedelta, timezone
 from models import RawItem
 import config
 
+# Slack Web API base URL.
 BASE = "https://slack.com/api"
 
 
 def _get(token: str, endpoint: str, params: dict = None) -> dict:
+    """
+    Make an authenticated GET request to the Slack Web API.
+
+    :param token: A Slack user or bot OAuth token (``xoxp-`` or ``xoxb-``).
+    :type token: str
+    :param endpoint: Slack API method name, e.g. ``"conversations.history"``.
+    :type endpoint: str
+    :param params: Optional query parameters to include in the request.
+    :type params: dict
+    :return: Parsed JSON response from the Slack API.
+    :rtype: dict
+    :raises RuntimeError: If the Slack API returns ``ok: false``.
+    :raises requests.HTTPError: If the HTTP request fails.
+    """
     r = requests.get(
         f"{BASE}/{endpoint}",
         headers={"Authorization": f"Bearer {token}"},
@@ -21,6 +46,21 @@ def _get(token: str, endpoint: str, params: dict = None) -> dict:
 
 
 def _username(token: str, uid: str, cache: dict) -> str:
+    """
+    Resolve a Slack user ID to a human-readable display name.
+
+    Results are stored in ``cache`` to avoid redundant API calls within a
+    single fetch pass.
+
+    :param token: A Slack OAuth token with ``users:read`` scope.
+    :type token: str
+    :param uid: Slack user ID to resolve, e.g. ``"U012AB3CD"``.
+    :type uid: str
+    :param cache: Mutable dict used as a local lookup cache.
+    :type cache: dict
+    :return: The user's real name, or the raw ``uid`` if resolution fails.
+    :rtype: str
+    """
     if uid in cache:
         return cache[uid]
     try:
@@ -32,12 +72,27 @@ def _username(token: str, uid: str, cache: dict) -> str:
 
 
 def _fetch_for_token(token: str, cutoff_ts: float) -> list[RawItem]:
-    """Fetch @mentions, DMs, and active channel threads for one user token."""
+    """
+    Fetch @mentions, DMs, and active channel threads for one user token.
+
+    Three passes are made against the Slack API:
+
+    1. ``search.messages`` to surface messages that mention the authenticated user.
+    2. ``conversations.list`` (IM/MPIM types) to capture recent DM threads.
+    3. ``conversations.list`` (channels) to capture channel activity since cutoff.
+
+    :param token: Slack user OAuth token (``xoxp-``).
+    :type token: str
+    :param cutoff_ts: Unix timestamp representing the earliest message to include.
+    :type cutoff_ts: float
+    :return: Deduplicated list of raw items from this workspace.
+    :rtype: list[RawItem]
+    """
     items: list[RawItem] = []
     seen:  set[str]      = set()
     cache: dict          = {}
 
-    # Identify whose token this is
+    # Identify whose token this is.
     try:
         auth   = _get(token, "auth.test")
         my_uid = auth.get("user_id", "")
@@ -82,7 +137,7 @@ def _fetch_for_token(token: str, cutoff_ts: float) -> list[RawItem]:
         print(f"[slack:{team}] mentions: {e}")
 
     # ── 2. Direct messages and group DMs ─────────────────────────────────────
-    # For DMs we don't filter by cutoff — always surface the most recent thread
+    # DMs are not filtered by cutoff — always surface the most recent thread.
     try:
         channels = _get(token, "conversations.list", {
             "types":            "im,mpim",
@@ -96,7 +151,7 @@ def _fetch_for_token(token: str, cutoff_ts: float) -> list[RawItem]:
             try:
                 msgs = _get(token, "conversations.history", {
                     "channel": ch_id,
-                    "limit":   10,          # most recent messages, no time filter
+                    "limit":   10,
                 }).get("messages", [])
             except Exception:
                 continue
@@ -104,7 +159,7 @@ def _fetch_for_token(token: str, cutoff_ts: float) -> list[RawItem]:
             if not msgs:
                 continue
 
-            # Build a single RawItem per DM conversation with full context
+            # Build a single RawItem per DM conversation with full context.
             lines = []
             for msg in reversed(msgs):
                 sender = _username(token, msg.get("user", "?"), cache)
@@ -183,6 +238,16 @@ def _fetch_for_token(token: str, cutoff_ts: float) -> list[RawItem]:
 
 
 def fetch() -> list[RawItem]:
+    """
+    Fetch Slack items across all configured workspaces.
+
+    Prefers per-user OAuth tokens stored in ``config.SLACK_USER_TOKENS``.
+    Falls back to the legacy bot token path if no user tokens are present.
+
+    :return: Combined list of raw items from all workspaces, deduplicated
+             within each workspace by item ID.
+    :rtype: list[RawItem]
+    """
     cutoff_ts = (
         datetime.now(timezone.utc) - timedelta(hours=config.LOOKBACK_HOURS)
     ).timestamp()

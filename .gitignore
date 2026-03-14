@@ -19,6 +19,7 @@ env/
 
 # TinyDB / data
 db.json
+data/page.db
 
 # Logs
 *.log

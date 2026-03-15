@@ -2,8 +2,9 @@ import os
 import sys
 import tempfile
 
-# Add api/ to path before any app imports
+# Add api/ and scripts/ to path before any app imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 # Point TinyDB at a temp file before app.py is imported (it opens DB at module level)
 _tmp = tempfile.mkdtemp()

@@ -3,7 +3,7 @@ services:
   page-nginx:
     image: nginx:1.27-alpine
     ports:
-      - "8082:8082"
+      - "127.0.0.1:8082:8082"
     volumes:
       - ./nginx/page.conf:/etc/nginx/conf.d/page.conf:ro
       - ./web:/usr/share/nginx/html:ro

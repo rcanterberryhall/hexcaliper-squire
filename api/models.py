@@ -118,3 +118,5 @@ class Analysis:
     body_preview:   str            = ""
     to_field:       str            = ""
     cc_field:       str            = ""
+    is_replied:     bool           = False
+    replied_at:     Optional[str]  = None

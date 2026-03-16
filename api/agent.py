@@ -42,7 +42,7 @@ User context:
 - Active projects: {projects_ctx}
 - Watch topics: {topics_ctx}
 - Noise/irrelevant topics: {noise_ctx} — if content is primarily about these with no direct relevance to {user_name}, set category="noise", priority="low", has_action=false
-{sender_hint}
+{sender_hint}{replied_hint}
 Analyze this item and extract structured information.
 
 Source: {source}
@@ -309,20 +309,38 @@ def analyze(item: RawItem) -> Analysis:
     :rtype: Analysis
     :raises requests.HTTPError: If the Ollama API request fails.
     """
-    to_field    = item.metadata.get("to", "")
-    cc_field    = item.metadata.get("cc", "")
+    to_field     = item.metadata.get("to", "")
+    cc_field     = item.metadata.get("cc", "")
+    is_replied   = bool(item.metadata.get("is_replied", False))
+    is_forwarded = bool(item.metadata.get("is_forwarded", False))
+    replied_at   = item.metadata.get("replied_at")
+    _user_name   = config.USER_NAME or "the user"
 
     # Build sender hint — tells the LLM which project this sender/group is
     # historically associated with, but does not override LLM classification.
     _sender_match = _match_sender(item)
     if _sender_match:
         sender_hint = (
-            f"- Sender/recipient hint: past items from this sender or group "
+            f"\n- Sender/recipient hint: past items from this sender or group "
             f"have been tagged to project \"{_sender_match}\". "
             f"Use this as a signal but verify against the content."
         )
     else:
         sender_hint = ""
+
+    if is_replied:
+        _when = f" (at {replied_at})" if replied_at else ""
+        replied_hint = (
+            f"\n- Status: {_user_name} has already replied to this email{_when}. "
+            f"Lower action urgency unless follow-up work is still clearly pending."
+        )
+    elif is_forwarded:
+        replied_hint = (
+            f"\n- Status: {_user_name} has forwarded this email. "
+            f"Consider whether further action is still required."
+        )
+    else:
+        replied_hint = ""
 
     response = requests.post(
         config.OLLAMA_URL,
@@ -343,6 +361,7 @@ def analyze(item: RawItem) -> Analysis:
                 to_field     = to_field,
                 cc_field     = cc_field,
                 sender_hint  = sender_hint,
+                replied_hint = replied_hint,
             ),
             "stream":  False,
             "format":  "json",
@@ -393,9 +412,11 @@ def analyze(item: RawItem) -> Analysis:
         project_tag    = data.get("project_tag") or item.metadata.get("project_tag"),
         goals          = [g for g in data.get("goals", []) if isinstance(g, str) and g],
         key_dates      = [d for d in data.get("key_dates", []) if isinstance(d, dict)],
-        body_preview   = item.body[:500],
+        body_preview   = item.body[:2000],
         to_field       = to_field,
         cc_field       = cc_field,
+        is_replied     = is_replied,
+        replied_at     = replied_at,
     )
 
 

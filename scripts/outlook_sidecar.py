@@ -178,6 +178,22 @@ def fetch() -> list[dict]:
                     to_list = [getattr(msg, "To", "") or ""]
                     cc_list = [getattr(msg, "CC", "") or ""]
 
+                # Detect reply/forward via LastVerbExecuted:
+                # 102 = olReplyToSender, 103 = olReplyToAll, 104 = olForward
+                last_verb   = getattr(msg, "LastVerbExecuted", 0) or 0
+                is_replied  = last_verb in (102, 103)
+                is_forwarded = last_verb == 104
+                replied_at  = None
+                if last_verb in (102, 103, 104):
+                    try:
+                        rv = msg.LastVerbExecutionTime
+                        replied_at = datetime(
+                            rv.year, rv.month, rv.day,
+                            rv.hour, rv.minute, rv.second,
+                        ).isoformat()
+                    except Exception:
+                        pass
+
                 items.append({
                     "source":    "outlook",
                     "item_id":   str(getattr(msg, "EntryID", "")),
@@ -187,9 +203,12 @@ def fetch() -> list[dict]:
                     "author":    f"{sender_name} <{sender_email}>".strip(),
                     "timestamp": dt.isoformat(),
                     "metadata":  {
-                        "is_read": getattr(msg, "UnRead", True) is False,
-                        "to":      "; ".join(to_list),
-                        "cc":      "; ".join(cc_list),
+                        "is_read":     getattr(msg, "UnRead", True) is False,
+                        "to":          "; ".join(to_list),
+                        "cc":          "; ".join(cc_list),
+                        "is_replied":  is_replied,
+                        "is_forwarded": is_forwarded,
+                        "replied_at":  replied_at,
                     },
                 })
             except Exception:

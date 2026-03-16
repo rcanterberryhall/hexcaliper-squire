@@ -39,7 +39,7 @@ from pydantic import BaseModel
 from tinydb import TinyDB, Query
 
 import config
-from agent import analyze_batch, analyze, extract_keywords, extract_emails
+from agent import analyze, extract_keywords, extract_emails
 from models import RawItem, Analysis
 import connector_slack
 import connector_github
@@ -94,6 +94,7 @@ def now_iso() -> str:
 
 scan_state: dict = {
     "running":        False,
+    "cancelled":      False,
     "progress":       0,
     "total":          0,
     "current_source": "",
@@ -139,6 +140,8 @@ def _save_analysis(a: Analysis) -> None:
                 "body_preview": a.body_preview,
                 "to_field":     a.to_field,
                 "cc_field":     a.cc_field,
+                "is_replied":   a.is_replied,
+                "replied_at":   a.replied_at,
                 "processed_at": now_iso(),
             },
             Q.item_id == a.item_id,
@@ -165,11 +168,16 @@ def _save_analysis(a: Analysis) -> None:
 
 
 def _run_scan(sources: list[str]) -> None:
-    scan_state.update({"running": True, "progress": 0, "total": 0, "message": "Starting..."})
+    scan_state.update({
+        "running": True, "cancelled": False,
+        "progress": 0, "total": 0, "message": "Starting...",
+    })
     started   = now_iso()
     all_items: list[RawItem] = []
 
     for src in sources:
+        if scan_state["cancelled"]:
+            break
         scan_state.update({"message": f"Fetching {src}...", "current_source": src})
         connector = CONNECTORS.get(src)
         if connector:
@@ -178,39 +186,52 @@ def _run_scan(sources: list[str]) -> None:
     scan_state["total"]   = len(all_items)
     scan_state["message"] = f"Analyzing {len(all_items)} items..."
 
-    def on_progress(i: int, total: int, source: str, title: str) -> None:
-        scan_state.update({
-            "progress":       i,
-            "current_source": source,
-            "current_item":   title,
-            "message":        f"[{source}] {i + 1}/{total}: {title}",
-        })
-
+    results = []
     try:
-        results = analyze_batch(all_items, progress_cb=on_progress)
+        for i, item in enumerate(all_items):
+            if scan_state["cancelled"]:
+                break
+            scan_state.update({
+                "progress":       i,
+                "current_source": item.source,
+                "current_item":   item.title[:60],
+                "message":        f"[{item.source}] {i + 1}/{len(all_items)}: {item.title[:60]}",
+            })
+            try:
+                results.append(analyze(item))
+            except Exception as e:
+                print(f"[agent] {item.item_id}: {e}")
+
         actions = sum(1 for r in results if r.has_action)
         for r in results:
             _save_analysis(r)
+        status = "cancelled" if scan_state["cancelled"] else "success"
         with db_lock:
             scan_logs.insert({
                 "started_at":    started,
                 "finished_at":   now_iso(),
                 "sources":       ",".join(sources),
-                "items_scanned": len(all_items),
+                "items_scanned": len(results),
                 "actions_found": actions,
-                "status":        "success",
+                "status":        status,
             })
-        scan_state["message"] = (
-            f"Done — {actions} action items found across "
-            f"{len(all_items)} items from {', '.join(sources)}."
-        )
+        if scan_state["cancelled"]:
+            scan_state["message"] = (
+                f"Stopped — {actions} action items found in "
+                f"{len(results)}/{len(all_items)} items processed."
+            )
+        else:
+            scan_state["message"] = (
+                f"Done — {actions} action items found across "
+                f"{len(all_items)} items from {', '.join(sources)}."
+            )
     except Exception as e:
         with db_lock:
             scan_logs.insert({
                 "started_at":    started,
                 "finished_at":   now_iso(),
                 "sources":       ",".join(sources),
-                "items_scanned": 0,
+                "items_scanned": len(results),
                 "actions_found": 0,
                 "status":        f"error: {e}",
             })
@@ -496,6 +517,15 @@ def scan_status():
     return scan_state
 
 
+@app.post("/scan/cancel")
+def cancel_scan():
+    """Signal a running scan to stop after the current item finishes."""
+    if not scan_state["running"]:
+        return {"ok": False, "detail": "No scan running"}
+    scan_state["cancelled"] = True
+    return {"ok": True}
+
+
 # ── Todos ─────────────────────────────────────────────────────────────────────
 
 @app.get("/todos")
@@ -543,6 +573,21 @@ def delete_todo(doc_id: int):
 
 # ── Analyses ──────────────────────────────────────────────────────────────────
 
+def _deserialize_analysis(a: dict) -> dict:
+    """Deserialize JSON-string fields and normalize field names for the frontend."""
+    for field in ("action_items", "goals", "key_dates"):
+        v = a.get(field)
+        if isinstance(v, str):
+            try:
+                a[field] = json.loads(v)
+            except Exception:
+                a[field] = []
+    # Normalize stored key "urgency" → "urgency_reason"
+    if "urgency" in a and "urgency_reason" not in a:
+        a["urgency_reason"] = a.pop("urgency")
+    return a
+
+
 @app.get("/analyses")
 def get_analyses(
     source:   Optional[str] = None,
@@ -557,7 +602,7 @@ def get_analyses(
         results = [a for a in results if a.get("category") == category]
 
     results.sort(key=lambda a: a.get("timestamp", ""), reverse=True)
-    return results[:200]
+    return [_deserialize_analysis(dict(a)) for a in results[:200]]
 
 
 # ── Stats ─────────────────────────────────────────────────────────────────────

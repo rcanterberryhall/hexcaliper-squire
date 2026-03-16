@@ -1798,7 +1798,7 @@ async function pollStatus() {
 }
 setInterval(pollStatus, 3000);
 
-$('searchInput').value = '';
+setTimeout(() => { $('searchInput').value = ''; }, 200);
 loadStats();
 loadTodos();
 loadItems();

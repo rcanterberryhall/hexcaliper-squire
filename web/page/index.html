@@ -410,6 +410,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 }
 .search-input:focus { border-color: var(--accent); }
 .search-input::placeholder { color: var(--muted); }
+.search-input::-webkit-search-cancel-button { display: none; }
 .toolbar-filters { display: flex; align-items: center; gap: 6px; flex: 1; padding: 0 10px; min-width: 0; }
 
 /* ── Detail panel ── */
@@ -647,7 +648,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
           <button class="vtab"        onclick="setView('items',this)">All Items</button>
         </div>
         <div class="toolbar-filters">
-          <input type="text"   class="search-input" id="searchInput" placeholder="Search…" oninput="onSearch(this.value)" autocomplete="off">
+          <input type="search" class="search-input" id="searchInput" placeholder="Search…" oninput="onSearch(this.value)" autocomplete="off">
           <select class="detail-select" id="dateFilterSel" onchange="onDateFilter(this.value)" title="Date range">
             <option value="all">All time</option>
             <option value="7">7 days</option>

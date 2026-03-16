@@ -185,8 +185,22 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
   animation: fadein .2s ease;
 }
 @keyframes fadein { from { opacity:0; transform:translateY(3px) } to { opacity:1; transform:none } }
-.todo:hover { border-color: var(--border2); transform: translateX(1px); }
-.todo.done  { opacity: .3; }
+.todo:hover          { border-color: var(--border2); transform: translateX(1px); }
+.todo.done           { opacity: .3; }
+.todo.assigned       { border-color: rgba(64,184,255,.25); }
+.todo.assigned .cb   { background: rgba(64,184,255,.12); border-color: var(--blue); color: var(--blue); }
+.assign-picker {
+  position: fixed; background: var(--surface); border: 1px solid var(--accent);
+  border-radius: var(--r); padding: 12px; min-width: 230px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.65); z-index: 200;
+}
+.assign-picker-label { font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); margin-bottom: 7px; }
+.assign-input {
+  width: 100%; background: var(--bg); border: 1px solid var(--border2);
+  color: var(--text); font-family: var(--mono); font-size: 12px;
+  padding: 6px 10px; border-radius: var(--r); outline: none; transition: border-color .15s; margin-bottom: 7px;
+}
+.assign-input:focus { border-color: var(--accent); }
 .cb {
   width: 18px; height: 18px; border: 1.5px solid var(--muted); border-radius: 4px;
   cursor: pointer; display: flex; align-items: center; justify-content: center;
@@ -898,26 +912,41 @@ function renderTodos(todos) {
 const srcIcon = { outlook: '✉', slack: '#', github: '⎇', jira: '◈' };
 
 function makeTodo(t) {
-  const el  = document.createElement('div');
-  el.className = `todo${t.done ? ' done' : ''}`;
-  const did  = t.doc_id || 0;
-  const dl   = t.deadline ? `<span class="chip chip-deadline">⚑ ${fmtDate(t.deadline)}</span>` : '';
-  const own  = t.owner && t.owner !== 'me' ? `<span class="chip">→ ${esc(t.owner)}</span>` : '';
-  const link    = t.url ? `<button class="ia open" onclick="window.open('${esc(t.url)}','_blank')" title="Open source">↗</button>` : '';
-  const tagBtn  = allProjects.length ? `<button class="ia" onclick="showProjectPicker('${esc(t.item_id || String(t.doc_id))}',this)" title="Tag to project">◈</button>` : '';
-  const proj = t.project_tag ? `<span class="chip"><span class="badge b-project">${esc(t.project_tag)}</span></span>` : '';
+  const el     = document.createElement('div');
+  const status = t.status || (t.done ? 'done' : 'open');
+  el.className = `todo${status === 'done' ? ' done' : status === 'assigned' ? ' assigned' : ''}`;
+  const did    = t.doc_id || 0;
+  const dl     = t.deadline ? `<span class="chip chip-deadline">⚑ ${fmtDate(t.deadline)}</span>` : '';
+  const own    = t.owner && t.owner !== 'me' ? `<span class="chip">→ ${esc(t.owner)}</span>` : '';
+  const link   = t.url ? `<button class="ia open" onclick="window.open('${esc(t.url)}','_blank')" title="Open source">↗</button>` : '';
+  const tagBtn = allProjects.length ? `<button class="ia" onclick="showProjectPicker('${esc(t.item_id || String(t.doc_id))}',this)" title="Tag to project">◈</button>` : '';
+  const proj   = t.project_tag ? `<span class="chip"><span class="badge b-project">${esc(t.project_tag)}</span></span>` : '';
   const itemIdAttr = esc(t.item_id || String(t.doc_id));
+
+  // Checkbox: complete if open, reopen if done/assigned
+  const cbClick   = (status !== 'open') ? `toggleDone(${did},false)` : `toggleDone(${did},true)`;
+  const cbContent = status === 'done' ? '✓' : status === 'assigned' ? '⇒' : '';
+
+  // Assigned-to chip
+  const assignedChip = status === 'assigned' && t.assigned_to
+    ? `<span class="chip" style="color:var(--blue)">⇒ ${esc(t.assigned_to)}</span>` : '';
+
+  // Assign button (not shown for completed items)
+  const assignBtn = status !== 'done'
+    ? `<button class="ia" onclick="event.stopPropagation();showAssignPicker(${did},'${esc(t.item_id||'')}',this)" title="Assign to someone">⇒</button>`
+    : '';
+
   el.innerHTML = `
-    <button class="cb" onclick="toggleDone(${did}, ${!t.done})">✓</button>
+    <button class="cb" onclick="${cbClick}">${cbContent}</button>
     <div style="cursor:pointer;min-width:0" onclick="openTodoDetail('${itemIdAttr}')">
       <div class="todo-desc">${esc(t.description)}</div>
       <div class="todo-meta">
         <span class="chip chip-${t.source}">${srcIcon[t.source] || '·'} ${t.source}</span>
         <span class="chip" style="color:var(--muted)">${esc(trunc(t.title || '', 42))}</span>
-        ${proj}${dl}${own}
+        ${proj}${dl}${own}${assignedChip}
       </div>
     </div>
-    <div class="todo-actions">${tagBtn}${link}<button class="ia del" onclick="deleteTodo(${did})" title="Delete">✕</button></div>`;
+    <div class="todo-actions">${assignBtn}${tagBtn}${link}<button class="ia del" onclick="deleteTodo(${did})" title="Delete">✕</button></div>`;
   return el;
 }
 
@@ -1126,11 +1155,24 @@ function openDetail(item) {
   const actions = linkedTodos.length ? `
     <div class="detail-section" id="detailTodosSection">
       <div class="detail-label">Tasks</div>
-      ${linkedTodos.map(t => `
+      ${linkedTodos.map(t => {
+        const st = t.status || (t.done ? 'done' : 'open');
+        const cbClick = st !== 'open'
+          ? `detailToggleDone(${t.doc_id},false,'${esc(item.item_id)}')`
+          : `detailToggleDone(${t.doc_id},true,'${esc(item.item_id)}')`;
+        const cbContent = st === 'done' ? '✓' : st === 'assigned' ? '⇒' : '';
+        const cbStyle   = st === 'assigned' ? 'style="background:rgba(64,184,255,.12);border-color:var(--blue);color:var(--blue)"' : '';
+        const assignedInfo = st === 'assigned' && t.assigned_to
+          ? `<span style="color:var(--blue);font-size:10px;margin-left:4px">⇒ ${esc(t.assigned_to)}</span>` : '';
+        const assignBtn = st !== 'done'
+          ? `<button class="ia" onclick="showAssignPicker(${t.doc_id},'${esc(item.item_id)}',this)" title="Assign">⇒</button>` : '';
+        return `
         <div class="detail-todo-row">
-          <button class="cb${t.done ? ' todo done' : ''}" onclick="detailToggleDone(${t.doc_id},${!t.done},'${esc(item.item_id)}')">${t.done ? '✓' : ''}</button>
-          <div class="detail-todo-text${t.done ? ' done' : ''}">${esc(t.description)}${t.deadline ? ` <span class="detail-todo-dl">⚑ ${fmtDate(t.deadline)}</span>` : ''}</div>
-        </div>`).join('')}
+          <button class="cb" ${cbStyle} onclick="${cbClick}">${cbContent}</button>
+          <div class="detail-todo-text${st === 'done' ? ' done' : ''}">${esc(t.description)}${assignedInfo}${t.deadline ? ` <span class="detail-todo-dl">⚑ ${fmtDate(t.deadline)}</span>` : ''}</div>
+          ${assignBtn ? `<div style="flex-shrink:0">${assignBtn}</div>` : ''}
+        </div>`;
+      }).join('')}
     </div>` : (item.action_items || []).length ? `
     <div class="detail-section">
       <div class="detail-label">Action Items</div>
@@ -1174,6 +1216,52 @@ function openDetail(item) {
     : '<span style="font-size:11px;color:var(--muted)">No source link</span>';
 
   $('detailPanel').classList.add('open');
+}
+
+function showAssignPicker(docId, itemId, anchorEl) {
+  const existing = document.querySelector('.assign-picker');
+  if (existing) { existing.remove(); if (existing.dataset.docId === String(docId)) return; }
+  const picker = document.createElement('div');
+  picker.className = 'assign-picker';
+  picker.dataset.docId = String(docId);
+  picker.innerHTML = `
+    <div class="assign-picker-label">Assign to</div>
+    <input class="assign-input" type="email" placeholder="colleague@company.com">
+    <button class="save-btn" style="width:100%;padding:5px" onclick="confirmAssign(${docId},'${esc(itemId)}')">Assign ⇒</button>`;
+  const rect = anchorEl.getBoundingClientRect();
+  picker.style.top  = (rect.bottom + 6) + 'px';
+  picker.style.left = Math.max(8, rect.right - 230) + 'px';
+  document.body.appendChild(picker);
+  const input = picker.querySelector('input');
+  input.focus();
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter')  confirmAssign(docId, itemId);
+    if (e.key === 'Escape') picker.remove();
+    e.stopPropagation();
+  });
+  setTimeout(() => document.addEventListener('click', _dismissAssignPicker, { once: true }), 0);
+}
+
+function _dismissAssignPicker(e) {
+  const p = document.querySelector('.assign-picker');
+  if (p && !p.contains(e.target)) p.remove();
+}
+
+async function confirmAssign(docId, itemId) {
+  const picker = document.querySelector('.assign-picker');
+  if (!picker) return;
+  const email = picker.querySelector('input').value.trim();
+  if (!email) { picker.querySelector('input').focus(); return; }
+  picker.remove();
+  try {
+    await api(`/todos/${docId}`, 'PATCH', { status: 'assigned', assigned_to: email });
+    await loadTodos();
+    loadStats();
+    if (itemId && $('detailPanel').classList.contains('open')) {
+      const item = findAnalysis(itemId);
+      if (item) openDetail(item);
+    }
+  } catch(e) { console.warn('confirmAssign:', e); }
 }
 
 async function detailToggleDone(docId, done, itemId) {

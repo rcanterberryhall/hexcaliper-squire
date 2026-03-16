@@ -572,6 +572,9 @@ def get_todos(
 
     for t in results:
         t["doc_id"] = t.doc_id
+        # Back-fill status for records created before this field existed
+        if "status" not in t:
+            t["status"] = "done" if t.get("done") else "open"
 
     return results
 
@@ -579,8 +582,16 @@ def get_todos(
 @app.patch("/todos/{doc_id}")
 def patch_todo(doc_id: int, body: dict):
     updates = {}
-    if "done" in body:
-        updates["done"] = bool(body["done"])
+    # status field takes precedence; "done" bool kept for backward compat
+    if "status" in body and body["status"] in ("open", "done", "assigned"):
+        updates["status"] = body["status"]
+        updates["done"]   = body["status"] == "done"
+    elif "done" in body:
+        done = bool(body["done"])
+        updates["done"]   = done
+        updates["status"] = "done" if done else "open"
+    if "assigned_to" in body:
+        updates["assigned_to"] = body["assigned_to"] or None
     if updates:
         with db_lock:
             todos.update(updates, doc_ids=[doc_id])

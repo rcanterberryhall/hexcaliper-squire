@@ -626,8 +626,14 @@ def _deserialize_analysis(a: dict) -> dict:
 
 @app.get("/analyses")
 def get_analyses(
-    source:   Optional[str] = None,
-    category: Optional[str] = None,
+    source:    Optional[str] = None,
+    category:  Optional[str] = None,
+    hierarchy: Optional[str] = None,
+    project:   Optional[str] = None,
+    q:         Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date:   Optional[str] = None,
+    limit:     int = 1000,
 ):
     with db_lock:
         results = analyses.all()
@@ -636,9 +642,25 @@ def get_analyses(
         results = [a for a in results if a.get("source") == source]
     if category:
         results = [a for a in results if a.get("category") == category]
+    if hierarchy:
+        results = [a for a in results if a.get("hierarchy") == hierarchy]
+    if project == "__none__":
+        results = [a for a in results if not a.get("project_tag")]
+    elif project:
+        results = [a for a in results if a.get("project_tag") == project]
+    if q:
+        ql = q.lower()
+        results = [a for a in results if any(
+            ql in (a.get(f) or "").lower()
+            for f in ("title", "summary", "author", "body_preview")
+        )]
+    if from_date:
+        results = [a for a in results if (a.get("timestamp") or "") >= from_date]
+    if to_date:
+        results = [a for a in results if (a.get("timestamp") or "") <= to_date]
 
     results.sort(key=lambda a: a.get("timestamp", ""), reverse=True)
-    return [_deserialize_analysis(dict(a)) for a in results[:200]]
+    return [_deserialize_analysis(dict(a)) for a in results[:limit]]
 
 
 # ── Stats ─────────────────────────────────────────────────────────────────────

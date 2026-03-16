@@ -384,6 +384,16 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 
+/* ── Search / date filter ── */
+.search-input {
+  flex: 1; min-width: 80px; background: var(--bg); border: 1px solid var(--border2);
+  color: var(--text); font-family: var(--mono); font-size: 12px;
+  padding: 5px 10px; border-radius: var(--r); outline: none; transition: border-color .15s;
+}
+.search-input:focus { border-color: var(--accent); }
+.search-input::placeholder { color: var(--muted); }
+.toolbar-filters { display: flex; align-items: center; gap: 6px; flex: 1; padding: 0 10px; min-width: 0; }
+
 /* ── Detail panel ── */
 .detail-panel {
   position: fixed; top: 0; right: -47%; bottom: 0; width: 47%;
@@ -596,6 +606,20 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
         <div class="frow"        id="type-passdown" onclick="setType('passdown',this)"><span class="fl">⇣ Passdowns</span><span class="fc" id="tc-passdown">0</span></div>
       </div>
 
+      <div class="sb-block">
+        <div class="sb-label">Hierarchy</div>
+        <div class="frow active" onclick="setHierarchy('all',this)">    <span class="fl">All</span>                                                        <span class="fc" id="hc-all">0</span></div>
+        <div class="frow"        onclick="setHierarchy('user',this)">   <span class="fl" style="color:var(--accent)">● User</span>                        <span class="fc" id="hc-user">0</span></div>
+        <div class="frow"        onclick="setHierarchy('project',this)"><span class="fl" style="color:var(--blue)">● Project</span>                       <span class="fc" id="hc-project">0</span></div>
+        <div class="frow"        onclick="setHierarchy('topic',this)">  <span class="fl" style="color:var(--amber)">● Topic</span>                        <span class="fc" id="hc-topic">0</span></div>
+        <div class="frow"        onclick="setHierarchy('general',this)"><span class="fl" style="color:var(--muted)">● General</span>                      <span class="fc" id="hc-general">0</span></div>
+      </div>
+
+      <div class="sb-block" id="projects-block">
+        <div class="sb-label">Projects</div>
+        <div id="project-filter-list"></div>
+      </div>
+
     </aside>
 
     <div class="main">
@@ -603,6 +627,15 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
         <div class="vtabs">
           <button class="vtab active" onclick="setView('todos',this)">Action Items</button>
           <button class="vtab"        onclick="setView('items',this)">All Items</button>
+        </div>
+        <div class="toolbar-filters">
+          <input type="text"   class="search-input" id="searchInput" placeholder="Search…" oninput="onSearch(this.value)">
+          <select class="detail-select" id="dateFilterSel" onchange="onDateFilter(this.value)" title="Date range">
+            <option value="all">All time</option>
+            <option value="7">7 days</option>
+            <option value="30">30 days</option>
+            <option value="90">90 days</option>
+          </select>
         </div>
         <label class="show-done"><input type="checkbox" id="showDone" onchange="loadTodos()"> Show completed</label>
       </div>
@@ -733,8 +766,13 @@ let allTodos        = [];
 let allAnalyses     = [];
 let ingestWasActive = false;
 let allProjects = [];
-let colWidths    = {}; // { colIndex: px }
-let _resizing    = null;
+let colWidths       = {}; // { colIndex: px }
+let _resizing       = null;
+let hierarchyFilter = 'all';
+let projectFilter   = 'all';
+let searchQuery     = '';
+let dateFilter      = 'all';
+let _searchTimer    = null;
 
 async function loadProjectList() {
   try { allProjects = await api('/projects'); } catch(e) { allProjects = []; }
@@ -887,14 +925,24 @@ async function loadStats() {
   } catch (e) { console.warn('stats:', e); }
 }
 
+function _filterTodos(todos) {
+  if (!searchQuery) return todos;
+  const q = searchQuery.toLowerCase();
+  return todos.filter(t =>
+    (t.description || '').toLowerCase().includes(q) ||
+    (t.title       || '').toLowerCase().includes(q)
+  );
+}
+
 async function loadTodos() {
   try {
     const p = new URLSearchParams({ done: $('showDone').checked });
     if (priFilter !== 'all') p.set('priority', priFilter);
     if (srcFilter !== 'all') p.set('source',   srcFilter);
     allTodos = await api('/todos?' + p);
-    renderTodos(allTodos);
-    updateCounts(allTodos);
+    const visible = _filterTodos(allTodos);
+    renderTodos(visible);
+    updateCounts(visible);
   } catch (e) { console.warn('todos:', e); }
 }
 
@@ -987,18 +1035,66 @@ async function loadItems() {
     allAnalyses = await api('/analyses');
     updateTypeCounts(allAnalyses);
     renderItems(allAnalyses);
+    renderSidebarProjects(allAnalyses);
   } catch (e) { console.warn('items:', e); }
 }
 
 function updateTypeCounts(items) {
   $('tc-all').textContent      = items.length;
   $('tc-passdown').textContent = items.filter(i => i.is_passdown).length;
+  // Hierarchy counts
+  const hc = { all: items.length, user: 0, project: 0, topic: 0, general: 0 };
+  items.forEach(i => { const h = i.hierarchy || 'general'; if (hc[h] !== undefined) hc[h]++; });
+  Object.entries(hc).forEach(([k, v]) => { const el = $('hc-' + k); if (el) el.textContent = v; });
+  // Project sidebar
+  renderSidebarProjects(items);
+}
+
+function renderSidebarProjects(items) {
+  const list = $('project-filter-list');
+  if (!list) return;
+  const counts = {};
+  (items || allAnalyses).forEach(a => { if (a.project_tag) counts[a.project_tag] = (counts[a.project_tag] || 0) + 1; });
+  const untaggedCount = (items || allAnalyses).filter(a => !a.project_tag).length;
+  let html = `<div class="srow ${projectFilter === 'all' ? 'active-all' : ''}" onclick="setProject('all',this)">
+    <div class="sdot sdot-all"></div><span style="font-size:12px">All</span><span class="sc">${(items || allAnalyses).length}</span></div>`;
+  allProjects.forEach(p => {
+    const active = projectFilter === p.name ? 'active-all' : '';
+    html += `<div class="srow ${active}" onclick="setProject('${esc(p.name)}',this)">
+      <div class="sdot" style="background:var(--accent)"></div>
+      <span style="font-size:12px">${esc(p.name)}</span>
+      <span class="sc">${counts[p.name] || 0}</span></div>`;
+  });
+  if (untaggedCount > 0) {
+    const active = projectFilter === '__none__' ? 'active-all' : '';
+    html += `<div class="srow ${active}" onclick="setProject('__none__',this)">
+      <div class="sdot" style="background:var(--muted)"></div>
+      <span style="font-size:12px;color:var(--muted)">Untagged</span>
+      <span class="sc">${untaggedCount}</span></div>`;
+  }
+  list.innerHTML = html;
 }
 
 function renderItems(items) {
   const el = $('items-view');
   let filtered = items;
-  if (typeFilter === 'passdown') filtered = items.filter(i => i.is_passdown);
+  if (typeFilter === 'passdown')    filtered = filtered.filter(i => i.is_passdown);
+  if (hierarchyFilter !== 'all')   filtered = filtered.filter(i => i.hierarchy === hierarchyFilter);
+  if (projectFilter === '__none__') filtered = filtered.filter(i => !i.project_tag);
+  else if (projectFilter !== 'all') filtered = filtered.filter(i => i.project_tag === projectFilter);
+  if (dateFilter !== 'all') {
+    const cutoff = new Date(Date.now() - parseInt(dateFilter) * 86400000).toISOString();
+    filtered = filtered.filter(i => (i.timestamp || '') >= cutoff);
+  }
+  if (searchQuery) {
+    const q = searchQuery.toLowerCase();
+    filtered = filtered.filter(i =>
+      (i.title || '').toLowerCase().includes(q) ||
+      (i.summary || '').toLowerCase().includes(q) ||
+      (i.author || '').toLowerCase().includes(q) ||
+      (i.body_preview || '').toLowerCase().includes(q)
+    );
+  }
   if (!filtered.length) {
     el.innerHTML = `<div class="empty"><div class="empty-icon">◻</div><div class="empty-msg">${
       items.length === 0 ? 'No items scanned yet.' : 'Nothing matches this filter.'
@@ -1053,25 +1149,24 @@ function itemRow(i) {
 
 function setPri(f, el) {
   priFilter = f;
-  document.querySelectorAll('.frow').forEach(e => e.classList.remove('active'));
+  el.closest('.sb-block').querySelectorAll('.frow').forEach(e => e.classList.remove('active'));
   el.classList.add('active');
   loadTodos();
 }
 
 function setSrc(s, el) {
   srcFilter = s;
-  document.querySelectorAll('.srow').forEach(e => { e.className = 'srow'; });
+  el.closest('.sb-block').querySelectorAll('.srow').forEach(e => { e.className = 'srow'; });
   el.classList.add(`active-${s}`);
   loadTodos();
 }
 
 function setType(t, el) {
   typeFilter = t;
-  document.querySelectorAll('#type-all,#type-passdown').forEach(e => e.classList.remove('active'));
+  el.closest('.sb-block').querySelectorAll('.frow').forEach(e => e.classList.remove('active'));
   el.classList.add('active');
   renderItems(allAnalyses);
   if ($('items-view').style.display !== 'none') return;
-  // Switch to items view to show passdowns
   if (t === 'passdown') {
     document.querySelectorAll('.vtab').forEach(e => e.classList.remove('active'));
     document.querySelectorAll('.vtab')[1].classList.add('active');
@@ -1079,6 +1174,45 @@ function setType(t, el) {
     $('items-view').style.display = 'block';
     loadItems();
   }
+}
+
+function setHierarchy(h, el) {
+  hierarchyFilter = h;
+  el.closest('.sb-block').querySelectorAll('.frow').forEach(e => e.classList.remove('active'));
+  el.classList.add('active');
+  _switchToItems();
+  renderItems(allAnalyses);
+}
+
+function setProject(p, el) {
+  projectFilter = p;
+  renderSidebarProjects(allAnalyses);
+  _switchToItems();
+  renderItems(allAnalyses);
+}
+
+function _switchToItems() {
+  if ($('items-view').style.display !== 'none') return;
+  document.querySelectorAll('.vtab').forEach(e => e.classList.remove('active'));
+  document.querySelectorAll('.vtab')[1].classList.add('active');
+  $('todo-view').style.display  = 'none';
+  $('items-view').style.display = 'block';
+}
+
+function onSearch(val) {
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(() => {
+    searchQuery = val.trim();
+    renderItems(allAnalyses);
+    const visible = _filterTodos(allTodos);
+    renderTodos(visible);
+    updateCounts(visible);
+  }, 200);
+}
+
+function onDateFilter(val) {
+  dateFilter = val;
+  renderItems(allAnalyses);
 }
 
 function setView(v, el) {

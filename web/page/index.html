@@ -366,6 +366,25 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
   margin-bottom: 4px;
 }
 .project-row-head span { font-size: 9px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); padding: 0 2px; }
+.learned-panel {
+  grid-column: 1 / -1;
+  background: var(--bg); border: 1px solid var(--border2);
+  border-radius: var(--r); padding: 10px 12px; margin-top: 2px;
+}
+.learned-panel-section { margin-bottom: 10px; }
+.learned-panel-section:last-child { margin-bottom: 0; }
+.learned-panel-label { font-size: 9px; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 3px;
+  background: var(--border); border: 1px solid var(--border2);
+  border-radius: 4px; padding: 2px 6px 2px 7px; font-size: 10px; color: var(--text); margin: 2px;
+}
+.chip-del {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 10px; padding: 0; line-height: 1;
+}
+.chip-del:hover { color: var(--red); }
+.no-chips { font-size: 10px; color: var(--muted); font-style: italic; }
 
 /* ── Status bar ── */
 .statusbar {
@@ -1583,19 +1602,26 @@ function addProjectRow(p = {}) {
   head.style.display = '';
   const row = document.createElement('div');
   row.className = 'project-row';
-  row.dataset.learned = JSON.stringify(p.learned_keywords || []);
+  row.dataset.learned        = JSON.stringify(p.learned_keywords || []);
+  row.dataset.learnedSenders = JSON.stringify(p.learned_senders  || []);
   const lcount = (p.learned_keywords || []).length;
+  const scount = (p.learned_senders  || []).length;
+  const total  = lcount + scount;
+  const metaLabel = total === 0 ? '0 learned'
+    : [lcount > 0 ? `${lcount} kw` : '', scount > 0 ? `${scount} senders` : ''].filter(Boolean).join(' · ');
   row.innerHTML = `
     <div>
       <input type="text" placeholder="Project Alpha" value="${esc(p.name || '')}">
       <div style="font-size:9px;color:var(--muted);margin-top:3px;display:flex;align-items:center;gap:6px">
-        <span class="learned-count">${lcount} learned</span>
-        ${lcount > 0 ? `<button class="ia" style="font-size:9px;padding:1px 4px" onclick="clearLearned(this)" title="Clear learned keywords">clear</button>` : ''}
+        <span class="learned-count">${metaLabel}</span>
+        ${total > 0 ? `<button class="ia" style="font-size:9px;padding:1px 4px" onclick="toggleLearnedPanel(this)">inspect</button>` : ''}
+        ${total > 0 ? `<button class="ia" style="font-size:9px;padding:1px 4px" onclick="clearLearned(this)" title="Clear all learned data">clear</button>` : ''}
       </div>
     </div>
     <input type="text" placeholder="alpha, PA-" value="${esc((p.keywords || []).join(', '))}">
     <input type="text" placeholder="proj-alpha, alpha-eng" value="${esc((p.channels || []).join(', '))}">
-    <button class="ia del" onclick="removeProjectRow(this)" title="Remove">✕</button>`;
+    <button class="ia del" onclick="removeProjectRow(this)" title="Remove">✕</button>
+    <div class="learned-panel" style="display:none"></div>`;
   list.appendChild(row);
 }
 
@@ -1604,21 +1630,92 @@ function removeProjectRow(btn) {
   if (!$('project-list').children.length) $('project-list-head').style.display = 'none';
 }
 
+function toggleLearnedPanel(btn) {
+  const row   = btn.closest('.project-row');
+  const panel = row.querySelector('.learned-panel');
+  if (panel.style.display !== 'none') {
+    panel.style.display = 'none';
+    btn.textContent = 'inspect';
+    return;
+  }
+  const kws = JSON.parse(row.dataset.learned        || '[]');
+  const srs = JSON.parse(row.dataset.learnedSenders || '[]');
+  const kwChips = kws.length
+    ? kws.map(k => `<span class="chip">${esc(k)}<button class="chip-del" onclick="removeLearnedChip(this,'kw')" title="Remove">✕</button></span>`).join('')
+    : '<span class="no-chips">none</span>';
+  const srChips = srs.length
+    ? srs.map(s => `<span class="chip">${esc(s)}<button class="chip-del" onclick="removeLearnedChip(this,'sr')" title="Remove">✕</button></span>`).join('')
+    : '<span class="no-chips">none</span>';
+  panel.innerHTML = `
+    <div class="learned-panel-section">
+      <div class="learned-panel-label kw-label">Keywords (${kws.length})</div>
+      <div class="kw-chips">${kwChips}</div>
+    </div>
+    <div class="learned-panel-section">
+      <div class="learned-panel-label sr-label">Senders (${srs.length})</div>
+      <div class="sr-chips">${srChips}</div>
+    </div>`;
+  panel.style.display = '';
+  btn.textContent = 'hide';
+}
+
+function removeLearnedChip(el, type) {
+  const chip = el.closest('.chip');
+  const val  = chip.childNodes[0].textContent.trim();
+  const row  = chip.closest('.project-row');
+  const panel = chip.closest('.learned-panel');
+  if (type === 'kw') {
+    let kws = JSON.parse(row.dataset.learned || '[]');
+    kws = kws.filter(k => k !== val);
+    row.dataset.learned = JSON.stringify(kws);
+    const scount = JSON.parse(row.dataset.learnedSenders || '[]').length;
+    _updateLearnedMeta(row, kws.length, scount);
+    const container = panel.querySelector('.kw-chips');
+    kws.length === 0 ? container.innerHTML = '<span class="no-chips">none</span>' : chip.remove();
+    panel.querySelector('.kw-label').textContent = `Keywords (${kws.length})`;
+  } else {
+    let srs = JSON.parse(row.dataset.learnedSenders || '[]');
+    srs = srs.filter(s => s !== val);
+    row.dataset.learnedSenders = JSON.stringify(srs);
+    const kcount = JSON.parse(row.dataset.learned || '[]').length;
+    _updateLearnedMeta(row, kcount, srs.length);
+    const container = panel.querySelector('.sr-chips');
+    srs.length === 0 ? container.innerHTML = '<span class="no-chips">none</span>' : chip.remove();
+    panel.querySelector('.sr-label').textContent = `Senders (${srs.length})`;
+  }
+}
+
+function _updateLearnedMeta(row, kcount, scount) {
+  const total   = kcount + scount;
+  const countEl = row.querySelector('.learned-count');
+  const metaDiv = countEl.parentElement;
+  if (total === 0) {
+    metaDiv.innerHTML = '<span class="learned-count">0 learned</span>';
+  } else {
+    countEl.textContent = [kcount > 0 ? `${kcount} kw` : '', scount > 0 ? `${scount} senders` : ''].filter(Boolean).join(' · ');
+  }
+}
+
 function clearLearned(btn) {
   const row = btn.closest('.project-row');
-  row.dataset.learned = '[]';
-  const meta = row.querySelector('.learned-count').parentElement;
-  meta.innerHTML = '<span class="learned-count">0 learned</span>';
+  row.dataset.learned        = '[]';
+  row.dataset.learnedSenders = '[]';
+  const panel = row.querySelector('.learned-panel');
+  if (panel) panel.style.display = 'none';
+  const inspectBtn = row.querySelector('.learned-count').parentElement.querySelector('[onclick*="toggleLearnedPanel"]');
+  if (inspectBtn) inspectBtn.textContent = 'inspect';
+  row.querySelector('.learned-count').parentElement.innerHTML = '<span class="learned-count">0 learned</span>';
 }
 
 function readProjects() {
   return Array.from($('project-list').querySelectorAll('.project-row')).map(row => {
     const inputs = row.querySelectorAll('input');
     return {
-      name:              inputs[0].value.trim(),
-      keywords:          inputs[1].value.split(',').map(s => s.trim()).filter(Boolean),
-      channels:          inputs[2].value.split(',').map(s => s.trim()).filter(Boolean),
-      learned_keywords:  JSON.parse(row.dataset.learned || '[]'),
+      name:             inputs[0].value.trim(),
+      keywords:         inputs[1].value.split(',').map(s => s.trim()).filter(Boolean),
+      channels:         inputs[2].value.split(',').map(s => s.trim()).filter(Boolean),
+      learned_keywords: JSON.parse(row.dataset.learned        || '[]'),
+      learned_senders:  JSON.parse(row.dataset.learnedSenders || '[]'),
     };
   }).filter(p => p.name);
 }

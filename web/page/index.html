@@ -178,7 +178,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 
 /* ── Todo cards ── */
 .todo {
-  display: grid; grid-template-columns: 18px 1fr auto; gap: 10px; align-items: start;
+  display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start;
   padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--r);
   margin-bottom: 5px; background: var(--surface);
   transition: border-color .15s, transform .1s;
@@ -746,10 +746,13 @@ function showProjectPicker(itemId, anchorEl) {
   const picker = document.createElement('div');
   picker.className = 'project-picker';
   picker.dataset.itemId = String(itemId);
-  if (!allProjects.length) {
+  const currentTag = (findAnalysis(String(itemId)) || allTodos.find(t => (t.item_id || String(t.doc_id)) === String(itemId)))?.project_tag;
+  const removeOpt  = currentTag
+    ? `<button style="color:var(--muted)" onclick="removeProjectTag('${esc(String(itemId))}',event)">✕ Remove tag</button>` : '';
+  if (!allProjects.length && !currentTag) {
     picker.innerHTML = '<div class="no-projects">No projects configured</div>';
   } else {
-    picker.innerHTML = allProjects.map(p =>
+    picker.innerHTML = removeOpt + allProjects.map(p =>
       `<button onclick="tagToProject('${esc(p.name)}','${esc(String(itemId))}',event)">${esc(p.name)}</button>`
     ).join('');
   }
@@ -772,8 +775,24 @@ async function tagToProject(projectName, itemId, evt) {
     await api(`/analyses/${encodeURIComponent(itemId)}/tag`, 'POST', { project: projectName });
     $('statusMsg').textContent = `Tagged to ${projectName} — learning keywords in background…`;
     await Promise.all([loadTodos(), loadItems()]);
+    if ($('detailPanel').classList.contains('open')) { const a = findAnalysis(itemId); if (a) openDetail(a); }
   } catch(e) {
     $('statusMsg').textContent = 'Tag failed: ' + e.message;
+  }
+}
+
+async function removeProjectTag(itemId, evt) {
+  evt.stopPropagation();
+  dismissPicker();
+  try {
+    await api(`/analyses/${encodeURIComponent(itemId)}`, 'PATCH', { project_tag: null });
+    const a = findAnalysis(itemId);
+    if (a) a.project_tag = null;
+    await Promise.all([loadTodos(), loadItems()]);
+    $('statusMsg').textContent = 'Project tag removed.';
+    if ($('detailPanel').classList.contains('open') && a) openDetail(a);
+  } catch(e) {
+    $('statusMsg').textContent = 'Remove failed: ' + e.message;
   }
 }
 
@@ -931,13 +950,16 @@ function makeTodo(t) {
   const assignedChip = status === 'assigned' && t.assigned_to
     ? `<span class="chip" style="color:var(--blue)">⇒ ${esc(t.assigned_to)}</span>` : '';
 
-  // Assign button (not shown for completed items)
+  // Assign button — sits beside the checkbox
   const assignBtn = status !== 'done'
-    ? `<button class="ia" onclick="event.stopPropagation();showAssignPicker(${did},'${esc(t.item_id||'')}',this)" title="Assign to someone">⇒</button>`
+    ? `<button class="ia" style="padding:2px 5px;font-size:11px" onclick="event.stopPropagation();showAssignPicker(${did},'${esc(t.item_id||'')}',this)" title="Assign to someone">⇒</button>`
     : '';
 
   el.innerHTML = `
-    <button class="cb" onclick="${cbClick}">${cbContent}</button>
+    <div style="display:flex;flex-direction:column;gap:3px;align-items:center;padding-top:1px;flex-shrink:0">
+      <button class="cb" onclick="${cbClick}">${cbContent}</button>
+      ${assignBtn}
+    </div>
     <div style="cursor:pointer;min-width:0" onclick="openTodoDetail('${itemIdAttr}')">
       <div class="todo-desc">${esc(t.description)}</div>
       <div class="todo-meta">
@@ -946,7 +968,7 @@ function makeTodo(t) {
         ${proj}${dl}${own}${assignedChip}
       </div>
     </div>
-    <div class="todo-actions">${assignBtn}${tagBtn}${link}<button class="ia del" onclick="deleteTodo(${did})" title="Delete">✕</button></div>`;
+    <div class="todo-actions">${tagBtn}${link}<button class="ia del" onclick="deleteTodo(${did})" title="Delete">✕</button></div>`;
   return el;
 }
 
@@ -1203,11 +1225,17 @@ function openDetail(item) {
     `<option value="${v}"${v === item.priority ? ' selected' : ''}>${v}</option>`).join('');
   const catOpts = ['reply_needed','task','deadline','review','approval','fyi','noise'].map(v =>
     `<option value="${v}"${v === item.category ? ' selected' : ''}>${v.replace('_',' ')}</option>`).join('');
+  const projOpts = [`<option value="">— none —</option>`]
+    .concat(allProjects.map(p =>
+      `<option value="${esc(p.name)}"${p.name === item.project_tag ? ' selected' : ''}>${esc(p.name)}</option>`))
+    .join('');
   $('detailEdit').innerHTML = `
     <label>Priority</label>
     <select class="detail-select" id="detailPri">${priOpts}</select>
     <label>Category</label>
     <select class="detail-select" id="detailCat">${catOpts}</select>
+    <label>Project</label>
+    <select class="detail-select" id="detailProj">${projOpts}</select>
     <button class="detail-save" onclick="saveDetailEdits('${esc(item.item_id)}')">Save</button>
     <span class="detail-save-msg" id="detailSaveMsg"></span>`;
 
@@ -1275,14 +1303,16 @@ async function detailToggleDone(docId, done, itemId) {
 }
 
 async function saveDetailEdits(itemId) {
-  const pri = $('detailPri').value;
-  const cat = $('detailCat').value;
-  const msg = $('detailSaveMsg');
+  const pri  = $('detailPri').value;
+  const cat  = $('detailCat').value;
+  const proj = $('detailProj')?.value ?? undefined;
+  const msg  = $('detailSaveMsg');
+  const body = { priority: pri, category: cat };
+  if (proj !== undefined) body.project_tag = proj || null;
   try {
-    await api(`/analyses/${encodeURIComponent(itemId)}`, 'PATCH', { priority: pri, category: cat });
-    // Update in-memory records so the table reflects the change immediately
+    await api(`/analyses/${encodeURIComponent(itemId)}`, 'PATCH', body);
     const a = findAnalysis(itemId);
-    if (a) { a.priority = pri; a.category = cat; }
+    if (a) { a.priority = pri; a.category = cat; if (proj !== undefined) a.project_tag = proj || null; }
     renderItems(allAnalyses);
     loadTodos();
     msg.textContent = 'Saved';

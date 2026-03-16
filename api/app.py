@@ -301,6 +301,8 @@ def patch_analysis(item_id: str, body: dict):
         updates["category"] = body["category"]
         if body["category"] == "noise":
             updates["has_action"] = False
+    if "project_tag" in body:
+        updates["project_tag"] = body["project_tag"] or None
     if not updates:
         raise HTTPException(status_code=400, detail="No valid fields to update.")
     with db_lock:

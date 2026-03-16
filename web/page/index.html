@@ -405,6 +405,76 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
   display: flex; align-items: center; gap: 8px; flex-shrink: 0;
 }
 
+/* ── Hamburger / sidebar backdrop ── */
+.menu-btn {
+  display: none; background: none; border: 1px solid var(--border2);
+  color: var(--muted); cursor: pointer; padding: 5px 9px; border-radius: var(--r);
+  font-size: 18px; line-height: 1; transition: all .15s; flex-shrink: 0;
+}
+.menu-btn:hover { border-color: var(--text); color: var(--text); }
+.sidebar-backdrop {
+  display: none; position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 59;
+}
+.sidebar-backdrop.open { display: block; }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  html, body { overflow: auto; }
+  .shell { grid-template-rows: 52px 2px 1fr 26px; height: auto; min-height: 100vh; }
+  .body  { grid-template-columns: 1fr; overflow: visible; }
+
+  /* Sidebar slides in as overlay */
+  .sidebar {
+    position: fixed; top: 0; left: -272px; bottom: 0; width: 260px;
+    z-index: 60; transition: left .22s ease; padding-top: 56px; overflow-y: auto;
+  }
+  .sidebar.open { left: 0; box-shadow: 6px 0 28px rgba(0,0,0,.55); }
+
+  /* Show hamburger, hide source toggles */
+  .menu-btn    { display: inline-flex; align-items: center; }
+  .src-toggles { display: none; }
+
+  /* Main content fills full width */
+  .main { overflow: visible; }
+  #todo-view, #items-view { overflow: visible; }
+
+  /* Detail panel: full screen */
+  .detail-panel { width: 100%; right: -100%; }
+  .detail-panel.open { right: 0; }
+
+  /* Settings modal: full screen */
+  .modal {
+    width: 100%; max-width: 100%; top: 0; left: 0;
+    transform: none; max-height: 100dvh; height: 100dvh;
+    border-radius: 0;
+  }
+
+  /* Items table: keep Source, Title, Pri, Actions; hide the rest */
+  .item-table th:nth-child(2), .item-table td:nth-child(2),
+  .item-table th:nth-child(4), .item-table td:nth-child(4),
+  .item-table th:nth-child(5), .item-table td:nth-child(5),
+  .item-table th:nth-child(7), .item-table td:nth-child(7),
+  .item-table th:nth-child(8), .item-table td:nth-child(8) { display: none; }
+  .t-title { max-width: 180px; }
+
+  /* Toolbar wrapping */
+  .main-toolbar { flex-wrap: wrap; gap: 6px; padding: 8px 12px; }
+  .vtabs .vtab  { padding: 5px 10px; }
+
+  /* Todo cards */
+  #todo-view, #items-view { padding: 10px 12px; }
+  .todo-meta { gap: 6px; }
+}
+
+@media (max-width: 480px) {
+  .wordmark-sub  { display: none; }
+  .wordmark-main { font-size: 11px; }
+  .topbar        { padding: 0 12px; }
+  .scan-btn      { padding: 6px 10px; font-size: 10px; }
+  .gear-btn      { padding: 5px 7px; }
+  .stat-val      { font-size: 17px; }
+}
+
 /* ── Resizable columns ── */
 .item-table th { position: relative; }
 .col-resize-handle {
@@ -434,6 +504,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
       </div>
     </div>
     <div class="topbar-right">
+      <button class="menu-btn" onclick="toggleSidebar()" title="Menu">☰</button>
       <div class="src-toggles">
         <button class="src-btn on-outlook" data-src="outlook" onclick="toggleSrc(this)">Outlook</button>
         <button class="src-btn on-slack"   data-src="slack"   onclick="toggleSrc(this)">Slack</button>
@@ -504,6 +575,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
   </div>
 
 </div>
+<div class="sidebar-backdrop" id="sidebarBackdrop" onclick="closeSidebar()"></div>
 <!-- Detail Panel -->
 <div class="detail-panel" id="detailPanel">
   <div class="detail-head">
@@ -937,6 +1009,24 @@ function setView(v, el) {
   if (v === 'items') loadItems();
 }
 
+// ── Sidebar (mobile) ──────────────────────────────────────────────────────────
+
+function toggleSidebar() {
+  document.querySelector('.sidebar').classList.toggle('open');
+  $('sidebarBackdrop').classList.toggle('open');
+}
+
+function closeSidebar() {
+  document.querySelector('.sidebar').classList.remove('open');
+  $('sidebarBackdrop').classList.remove('open');
+}
+
+// Close sidebar when a filter row is tapped on mobile
+document.querySelector('.sidebar').addEventListener('click', e => {
+  if (window.innerWidth > 768) return;
+  if (e.target.closest('.frow, .srow')) setTimeout(closeSidebar, 120);
+});
+
 // ── Detail panel ──────────────────────────────────────────────────────────────
 
 function findAnalysis(itemId) {
@@ -1042,7 +1132,8 @@ function closeDetail() {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if ($('settingsModal').classList.contains('open')) { closeSettings(); return; }
-    closeDetail();
+    if ($('detailPanel').classList.contains('open'))   { closeDetail();   return; }
+    closeSidebar();
   }
 });
 

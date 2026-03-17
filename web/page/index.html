@@ -1924,21 +1924,32 @@ function closeSeed() {
 
 async function runSeed() {
   const ctx = $('seedContext').value.trim();
-  $('seedRunBtn').disabled     = true;
+  $('seedRunBtn').disabled        = true;
   $('seedProgress').style.display = '';
-  $('seedProgress').textContent   = 'Analysing items… this may take a minute.';
+  $('seedProgress').textContent   = 'Starting…';
   $('seedResults').style.display  = 'none';
   $('seedApplyBtn').style.display = 'none';
   $('seedMsg').textContent        = '';
   try {
     const body = {};
     if (ctx) body.context = ctx;
-    const res = await api('/seed', 'POST', body);
-    _seedResults = res;
-    $('seedProgress').textContent = `Analysed ${res.item_count} items (${res.passdown_count} passdowns).`;
-    renderSeedResults(res);
-    $('seedResults').style.display  = '';
-    $('seedApplyBtn').style.display = '';
+    await api('/seed', 'POST', body);
+    // Poll for completion
+    while (true) {
+      await new Promise(r => setTimeout(r, 3000));
+      const st = await api('/seed/status', 'GET');
+      $('seedProgress').textContent = st.progress || 'Analysing…';
+      if (st.status === 'done') {
+        _seedResults = st;
+        renderSeedResults(st);
+        $('seedResults').style.display  = '';
+        $('seedApplyBtn').style.display = '';
+        break;
+      } else if (st.status === 'error') {
+        $('seedProgress').textContent = 'Analysis failed: ' + (st.progress || 'unknown error');
+        break;
+      }
+    }
   } catch(e) {
     $('seedProgress').textContent = 'Analysis failed: ' + e.message;
   } finally {

@@ -221,14 +221,17 @@ def fetch(lookback_hours: int = LOOKBACK_HOURS, max_emails: int = MAX_EMAILS) ->
         pythoncom.CoUninitialize()
 
 
+_POST_BATCH = 50   # items per /ingest request — keeps payloads well under nginx limits
+
+
 def post(items: list[dict], client_id: str, client_secret: str) -> None:
     """
-    POST fetched email items to the Squire ``/ingest`` endpoint.
+    POST fetched email items to the Squire ``/ingest`` endpoint in batches.
 
-    Includes Cloudflare Access service token headers so requests pass
-    through the CF Access policy protecting ``squire.hexcaliper.com``.
-    The API deduplicates by ``item_id`` and queues new items for AI
-    analysis in the background.
+    Large seed runs (500 emails) would exceed nginx's default body-size limit
+    in a single request.  Items are chunked into batches of ``_POST_BATCH``
+    and POSTed sequentially; the API deduplicates by ``item_id`` so retries
+    are safe.
 
     :param items: List of email dicts as returned by ``fetch()``.
     :type items: list[dict]
@@ -241,23 +244,33 @@ def post(items: list[dict], client_id: str, client_secret: str) -> None:
     if not items:
         print("No emails found in lookback window.")
         return
-    try:
-        r = requests.post(
-            f"{PAGE_API_URL}/ingest",
-            json={"items": items},
-            headers={
-                "CF-Access-Client-Id":     client_id,
-                "CF-Access-Client-Secret": client_secret,
-            },
-            timeout=30,
-        )
-        r.raise_for_status()
-        result = r.json()
-        print(f"Sent {len(items)} → accepted {result.get('received','?')}, skipped {result.get('skipped','?')}")
-    except requests.ConnectionError:
-        sys.exit(f"ERROR: Could not reach API at {PAGE_API_URL} — is the appliance reachable?")
-    except Exception as e:
-        sys.exit(f"ERROR: {e}")
+
+    headers = {
+        "CF-Access-Client-Id":     client_id,
+        "CF-Access-Client-Secret": client_secret,
+    }
+    total_received = total_skipped = 0
+    batches = [items[i:i + _POST_BATCH] for i in range(0, len(items), _POST_BATCH)]
+    for idx, batch in enumerate(batches, 1):
+        try:
+            r = requests.post(
+                f"{PAGE_API_URL}/ingest",
+                json={"items": batch},
+                headers=headers,
+                timeout=30,
+            )
+            r.raise_for_status()
+            result = r.json()
+            total_received += result.get("received", 0)
+            total_skipped  += result.get("skipped",  0)
+            print(f"  Batch {idx}/{len(batches)}: accepted {result.get('received','?')}, "
+                  f"skipped {result.get('skipped','?')}", flush=True)
+        except requests.ConnectionError:
+            sys.exit(f"ERROR: Could not reach API at {PAGE_API_URL} — is the appliance reachable?")
+        except Exception as e:
+            sys.exit(f"ERROR: {e}")
+
+    print(f"Done — {len(items)} sent, {total_received} accepted, {total_skipped} skipped.")
 
 
 if __name__ == "__main__":

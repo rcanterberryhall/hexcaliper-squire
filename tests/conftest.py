@@ -12,7 +12,9 @@ os.environ["DB_PATH"] = os.path.join(_tmp, "test.db")
 
 import pytest
 from fastapi.testclient import TestClient
+import app as _app
 from app import app, analyses, todos, scan_logs, settings_tbl
+import config
 
 
 @pytest.fixture(scope="session")
@@ -22,9 +24,13 @@ def client():
 
 @pytest.fixture(autouse=True)
 def clear_db():
-    """Wipe all tables before each test for isolation."""
+    """Wipe all tables and reset mutable config/job state before each test."""
     analyses.truncate()
     todos.truncate()
     scan_logs.truncate()
     settings_tbl.truncate()
+    config.PROJECTS = []
+    config.FOCUS_TOPICS = []
+    config.NOISE_KEYWORDS = []
+    _app._seed_job = {"status": "idle"}
     yield

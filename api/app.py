@@ -70,6 +70,9 @@ situations_tbl = db.table("situations")
 Q            = Query()
 db_lock      = threading.Lock()
 
+# Single-slot job state for the seed background job (one user, one job at a time)
+_seed_job: dict = {"status": "idle"}
+
 # Hot-load any previously saved settings on startup
 _saved_settings = settings_tbl.get(doc_id=1)
 if _saved_settings:
@@ -1378,143 +1381,179 @@ Respond ONLY with valid JSON — no markdown, no explanation:
 """
 
 
-@app.post("/seed")
-async def seed_preview(request: Request):
+def _run_seed_job(context: str) -> None:
     """
-    Two-pass LLM map-reduce over all stored analyses.
-    Returns suggested projects and topics without writing anything.
+    Background thread for POST /seed.  Runs the two-pass LLM map-reduce and
+    writes results into ``_seed_job`` so GET /seed/status can return progress.
     """
-    body = {}
+    global _seed_job
     try:
-        body = await request.json()
-    except Exception:
-        pass
+        user_name     = config.USER_NAME or "the user"
+        context_block = f"Context about {user_name}: {context}" if context else ""
 
-    context = body.get("context", "") if isinstance(body, dict) else ""
-    user_name = config.USER_NAME or "the user"
-    context_block = f"Context about {user_name}: {context}" if context else ""
+        # 1. Fetch all analyses, sort passdowns first then by priority, cap at 120
+        with db_lock:
+            all_items = analyses.all()
 
-    # 1. Fetch all analyses, sort passdowns first then by priority, cap at 120
-    with db_lock:
-        all_items = analyses.all()
+        priority_rank = {"high": 3, "medium": 2, "low": 1}
 
-    priority_rank = {"high": 3, "medium": 2, "low": 1}
+        def _sort_key(a):
+            is_pd = 1 if a.get("is_passdown") else 0
+            pri   = priority_rank.get(a.get("priority", "low"), 1)
+            return (is_pd, pri)
 
-    def _sort_key(a):
-        is_pd = 1 if a.get("is_passdown") else 0
-        pri = priority_rank.get(a.get("priority", "low"), 1)
-        return (is_pd, pri)
+        all_items.sort(key=_sort_key, reverse=True)
+        all_items = all_items[:120]
 
-    all_items.sort(key=_sort_key, reverse=True)
-    all_items = all_items[:120]
+        passdown_count = sum(1 for a in all_items if a.get("is_passdown"))
+        n_items        = len(all_items)
+        batch_size     = 12
+        n_batches      = max(1, (n_items + batch_size - 1) // batch_size)
 
-    passdown_count = sum(1 for a in all_items if a.get("is_passdown"))
+        _seed_job["progress"] = f"Analysing {n_items} items ({passdown_count} passdowns)…"
 
-    # 2. Map pass: batch_size=12
-    batch_size = 12
-    map_results = []
+        # 2. Map pass
+        map_results = []
+        for batch_num, batch_start in enumerate(range(0, n_items, batch_size), 1):
+            _seed_job["progress"] = f"Map pass: batch {batch_num}/{n_batches}…"
+            batch = all_items[batch_start:batch_start + batch_size]
+            lines = []
+            for a in batch:
+                source   = a.get("source", "?")
+                title    = a.get("title", "(no title)")
+                summary  = a.get("summary", "")
+                priority = a.get("priority", "low")
+                category = a.get("category", "")
+                is_pd    = a.get("is_passdown", False)
+                suffix   = ", passdown" if is_pd else ""
+                lines.append(f"[{source}] {title}: {summary} ({priority}, {category}{suffix})")
+            items_block = "\n".join(lines)
 
-    for batch_start in range(0, len(all_items), batch_size):
-        batch = all_items[batch_start:batch_start + batch_size]
-        lines = []
-        for a in batch:
-            source   = a.get("source", "?")
-            title    = a.get("title", "(no title)")
-            summary  = a.get("summary", "")
-            priority = a.get("priority", "low")
-            category = a.get("category", "")
-            is_pd    = a.get("is_passdown", False)
-            suffix   = ", passdown" if is_pd else ""
-            lines.append(f"[{source}] {title}: {summary} ({priority}, {category}{suffix})")
-        items_block = "\n".join(lines)
+            prompt = MAP_PROMPT.format(
+                user_name=user_name,
+                context_block=context_block,
+                items_block=items_block,
+            )
+            try:
+                resp = http_requests.post(
+                    config.OLLAMA_URL,
+                    headers=config.ollama_headers(),
+                    json={
+                        "model":   config.OLLAMA_MODEL,
+                        "prompt":  prompt,
+                        "stream":  False,
+                        "format":  "json",
+                        "options": {"temperature": 0.2, "num_predict": 600},
+                    },
+                    timeout=90,
+                )
+                resp.raise_for_status()
+                data = json.loads(resp.json().get("response", "{}"))
+                map_results.append(data)
+            except Exception as e:
+                print(f"[seed] map batch {batch_start} failed: {e}")
+                continue
 
-        prompt = MAP_PROMPT.format(
+        if not map_results:
+            _seed_job = {
+                "status":        "done",
+                "progress":      "No results from map pass.",
+                "projects":      [],
+                "topics":        [],
+                "item_count":    n_items,
+                "passdown_count": passdown_count,
+            }
+            return
+
+        # 3. Reduce pass
+        _seed_job["progress"] = f"Reduce pass: consolidating {len(map_results)} batches…"
+        themes_parts = []
+        for i, mr in enumerate(map_results):
+            projects_str = json.dumps(mr.get("projects", []))
+            concerns_str = json.dumps(mr.get("concerns", []))
+            themes_parts.append(f"Batch {i + 1}:\n  projects: {projects_str}\n  concerns: {concerns_str}")
+        themes_block = "\n\n".join(themes_parts)
+
+        reduce_prompt = REDUCE_PROMPT.format(
             user_name=user_name,
             context_block=context_block,
-            items_block=items_block,
+            n_batches=len(map_results),
+            n_items=n_items,
+            themes_block=themes_block,
         )
+
         try:
             resp = http_requests.post(
                 config.OLLAMA_URL,
                 headers=config.ollama_headers(),
                 json={
-                    "model": config.OLLAMA_MODEL,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
+                    "model":   config.OLLAMA_MODEL,
+                    "prompt":  reduce_prompt,
+                    "stream":  False,
+                    "format":  "json",
                     "options": {"temperature": 0.2, "num_predict": 600},
                 },
                 timeout=90,
             )
             resp.raise_for_status()
-            data = json.loads(resp.json().get("response", "{}"))
-            map_results.append(data)
+            final    = json.loads(resp.json().get("response", "{}"))
+            projects = final.get("projects", [])
+            topics   = final.get("topics", [])
         except Exception as e:
-            print(f"[seed] map batch {batch_start} failed: {e}")
-            continue
+            print(f"[seed] reduce failed: {e}")
+            # Fallback: flat merge of map results
+            projects   = []
+            seen_names = set()
+            topics     = []
+            for mr in map_results:
+                for p in mr.get("projects", []):
+                    nm = p.get("name", "")
+                    if nm and nm not in seen_names:
+                        seen_names.add(nm)
+                        projects.append(p)
+                topics.extend(mr.get("concerns", []))
+            topics = list(dict.fromkeys(topics))
 
-    if not map_results:
-        return {
-            "projects": [],
-            "topics": [],
-            "item_count": len(all_items),
+        _seed_job = {
+            "status":         "done",
+            "progress":       f"Done — analysed {n_items} items.",
+            "projects":       projects,
+            "topics":         topics,
+            "item_count":     n_items,
             "passdown_count": passdown_count,
         }
 
-    # 3. Reduce pass
-    themes_parts = []
-    for i, mr in enumerate(map_results):
-        projects_str = json.dumps(mr.get("projects", []))
-        concerns_str = json.dumps(mr.get("concerns", []))
-        themes_parts.append(f"Batch {i + 1}:\n  projects: {projects_str}\n  concerns: {concerns_str}")
-    themes_block = "\n\n".join(themes_parts)
-
-    reduce_prompt = REDUCE_PROMPT.format(
-        user_name=user_name,
-        context_block=context_block,
-        n_batches=len(map_results),
-        n_items=len(all_items),
-        themes_block=themes_block,
-    )
-
-    try:
-        resp = http_requests.post(
-            config.OLLAMA_URL,
-            headers=config.ollama_headers(),
-            json={
-                "model": config.OLLAMA_MODEL,
-                "prompt": reduce_prompt,
-                "stream": False,
-                "format": "json",
-                "options": {"temperature": 0.2, "num_predict": 600},
-            },
-            timeout=90,
-        )
-        resp.raise_for_status()
-        final = json.loads(resp.json().get("response", "{}"))
-        projects = final.get("projects", [])
-        topics   = final.get("topics", [])
     except Exception as e:
-        print(f"[seed] reduce failed: {e}")
-        # Fallback: flat merge of map results
-        projects = []
-        seen_names = set()
-        topics = []
-        for mr in map_results:
-            for p in mr.get("projects", []):
-                nm = p.get("name", "")
-                if nm and nm not in seen_names:
-                    seen_names.add(nm)
-                    projects.append(p)
-            topics.extend(mr.get("concerns", []))
-        topics = list(dict.fromkeys(topics))  # deduplicate preserving order
+        _seed_job = {"status": "error", "progress": str(e)}
 
-    return {
-        "projects":       projects,
-        "topics":         topics,
-        "item_count":     len(all_items),
-        "passdown_count": passdown_count,
-    }
+
+@app.post("/seed")
+async def seed_preview(request: Request):
+    """
+    Start a background two-pass LLM map-reduce over all stored analyses.
+    Returns immediately with ``{"status": "running"}``.
+    Poll ``GET /seed/status`` for progress and final results.
+    """
+    global _seed_job
+    if _seed_job.get("status") == "running":
+        return {"status": "running", "progress": _seed_job.get("progress", "")}
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    context = body.get("context", "") if isinstance(body, dict) else ""
+
+    _seed_job = {"status": "running", "progress": "Starting…"}
+    threading.Thread(target=_run_seed_job, args=(context,), daemon=True).start()
+    return {"status": "running", "progress": "Starting…"}
+
+
+@app.get("/seed/status")
+def seed_status():
+    """Return the current state of the background seed job."""
+    return _seed_job
 
 
 @app.post("/seed/apply")

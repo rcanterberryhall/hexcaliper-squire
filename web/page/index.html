@@ -1573,6 +1573,10 @@ function openDetail(item) {
     <select class="detail-select" id="detailCat">${catOpts}</select>
     <label>Project</label>
     <select class="detail-select" id="detailProj">${projOpts}</select>
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+      <input type="checkbox" id="detailPassdown" ${item.is_passdown ? 'checked' : ''}>
+      Passdown
+    </label>
     <button class="detail-save" onclick="saveDetailEdits('${esc(item.item_id)}')">Save</button>
     <span class="detail-save-msg" id="detailSaveMsg"></span>`;
 
@@ -1640,16 +1644,20 @@ async function detailToggleDone(docId, done, itemId) {
 }
 
 async function saveDetailEdits(itemId) {
-  const pri  = $('detailPri').value;
-  const cat  = $('detailCat').value;
-  const proj = $('detailProj')?.value ?? undefined;
-  const msg  = $('detailSaveMsg');
-  const body = { priority: pri, category: cat };
+  const pri        = $('detailPri').value;
+  const cat        = $('detailCat').value;
+  const proj       = $('detailProj')?.value ?? undefined;
+  const isPassdown = $('detailPassdown')?.checked;
+  const msg        = $('detailSaveMsg');
+  const body = { priority: pri, category: cat, is_passdown: isPassdown };
   if (proj !== undefined) body.project_tag = proj || null;
   try {
     await api(`/analyses/${encodeURIComponent(itemId)}`, 'PATCH', body);
     const a = findAnalysis(itemId);
-    if (a) { a.priority = pri; a.category = cat; if (proj !== undefined) a.project_tag = proj || null; }
+    if (a) {
+      a.priority = pri; a.category = cat; a.is_passdown = isPassdown;
+      if (proj !== undefined) a.project_tag = proj || null;
+    }
     renderItems(allAnalyses);
     loadTodos();
     msg.textContent = 'Saved';

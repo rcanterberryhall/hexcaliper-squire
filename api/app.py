@@ -342,6 +342,8 @@ def patch_analysis(item_id: str, body: dict, background_tasks: BackgroundTasks):
             updates["has_action"] = False
     if "project_tag" in body:
         updates["project_tag"] = body["project_tag"] or None
+    if "is_passdown" in body and isinstance(body["is_passdown"], bool):
+        updates["is_passdown"] = body["is_passdown"]
     if not updates:
         raise HTTPException(status_code=400, detail="No valid fields to update.")
     with db_lock:

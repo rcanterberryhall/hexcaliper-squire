@@ -211,7 +211,16 @@ def extract_keywords(project_name: str, title: str, body: str) -> list[str]:
 import re as _re
 
 _PASSDOWN_PATTERNS = _re.compile(
-    r'\bpassdown\b|notes from \w+ shift',
+    r'\bpassdown\b'
+    r'|notes from \w+ shift'
+    r'|\bshift highlights\b'
+    r'|\bshift activities\b'
+    r'|\bshift notes\b'
+    r'|\bshift report\b'
+    r'|\bshift summary\b'
+    r'|\bshift handoff\b'
+    r'|\bshift handover\b'
+    r'|\bshift update\b',
     _re.IGNORECASE,
 )
 _EMAIL_RE = _re.compile(r'[\w.+\-]+@[\w.\-]+\.[a-z]{2,}', _re.IGNORECASE)

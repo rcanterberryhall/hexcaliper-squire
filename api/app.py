@@ -1413,7 +1413,8 @@ def _run_seed_job(context: str) -> None:
         _seed_job["progress"] = f"Analysing {n_items} items ({passdown_count} passdowns)…"
 
         # 2. Map pass
-        map_results = []
+        map_results  = []
+        last_map_err = None
         for batch_num, batch_start in enumerate(range(0, n_items, batch_size), 1):
             _seed_job["progress"] = f"Map pass: batch {batch_num}/{n_batches}…"
             batch = all_items[batch_start:batch_start + batch_size]
@@ -1451,16 +1452,18 @@ def _run_seed_job(context: str) -> None:
                 data = json.loads(resp.json().get("response", "{}"))
                 map_results.append(data)
             except Exception as e:
+                last_map_err = str(e)
                 print(f"[seed] map batch {batch_start} failed: {e}")
                 continue
 
         if not map_results:
+            err_detail = f" ({last_map_err})" if last_map_err else ""
             _seed_job = {
-                "status":        "done",
-                "progress":      "No results from map pass.",
-                "projects":      [],
-                "topics":        [],
-                "item_count":    n_items,
+                "status":         "error",
+                "progress":       f"All map batches failed{err_detail}",
+                "projects":       [],
+                "topics":         [],
+                "item_count":     n_items,
                 "passdown_count": passdown_count,
             }
             return

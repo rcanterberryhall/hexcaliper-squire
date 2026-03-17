@@ -1946,7 +1946,8 @@ async function runSeed() {
         $('seedApplyBtn').style.display = '';
         break;
       } else if (st.status === 'error') {
-        $('seedProgress').textContent = 'Analysis failed: ' + (st.progress || 'unknown error');
+        $('seedProgress').textContent = 'Error: ' + (st.progress || 'unknown error');
+        $('seedRunBtn').disabled = false;
         break;
       }
     }

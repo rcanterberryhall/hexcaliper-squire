@@ -45,6 +45,7 @@ import connector_slack
 import connector_github
 import connector_jira
 import connector_outlook
+import connector_teams
 
 app = FastAPI(title="Hexcaliper Squire API", version="1.0.0")
 
@@ -92,6 +93,7 @@ CONNECTORS = {
     "github":  connector_github,
     "jira":    connector_jira,
     "outlook": connector_outlook,
+    "teams":   connector_teams,
 }
 
 
@@ -1204,6 +1206,127 @@ def disconnect_slack_workspace(team_id: str):
         existing = settings_tbl.get(doc_id=1) or {}
     tokens = [t for t in existing.get("slack_user_tokens", []) if t.get("team_id") != team_id]
     existing["slack_user_tokens"] = tokens
+    with db_lock:
+        if settings_tbl.get(doc_id=1):
+            settings_tbl.update(existing, doc_ids=[1])
+        else:
+            settings_tbl.insert(existing)
+    config.apply_overrides(existing)
+    return {"ok": True}
+
+
+# ── Teams OAuth ────────────────────────────────────────────────────────────────
+
+_TEAMS_REDIRECT_URI = "https://squire.hexcaliper.com/page/api/teams/callback"
+_TEAMS_SCOPES       = "Chat.Read ChannelMessage.Read.All Channel.ReadBasic.All offline_access"
+
+
+@app.get("/teams/connect")
+def teams_connect():
+    if not config.TEAMS_CLIENT_ID:
+        raise HTTPException(status_code=400, detail="TEAMS_CLIENT_ID not configured — save it in Settings first.")
+    url = (
+        "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+        f"?client_id={config.TEAMS_CLIENT_ID}"
+        f"&response_type=code"
+        f"&redirect_uri={_TEAMS_REDIRECT_URI}"
+        f"&scope={_TEAMS_SCOPES}"
+        f"&response_mode=query"
+    )
+    return Response(status_code=302, headers={"Location": url})
+
+
+@app.get("/teams/callback")
+def teams_callback(code: str = None, error: str = None, error_description: str = None):
+    if error:
+        return Response(status_code=302, headers={"Location": f"/page/?teams_error={error}"})
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing OAuth code.")
+
+    r = http_requests.post(
+        "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+        data={
+            "grant_type":    "authorization_code",
+            "code":          code,
+            "redirect_uri":  _TEAMS_REDIRECT_URI,
+            "client_id":     config.TEAMS_CLIENT_ID,
+            "client_secret": config.TEAMS_CLIENT_SECRET,
+            "scope":         _TEAMS_SCOPES,
+        },
+        timeout=15,
+    )
+    r.raise_for_status()
+    data = r.json()
+
+    if "error" in data:
+        return Response(
+            status_code=302,
+            headers={"Location": f"/page/?teams_error={data.get('error', 'unknown')}"},
+        )
+
+    access_token  = data.get("access_token")
+    refresh_token = data.get("refresh_token")
+    if not access_token:
+        return Response(status_code=302, headers={"Location": "/page/?teams_error=no_access_token"})
+
+    # Resolve display name from Graph /me
+    try:
+        me_r = http_requests.get(
+            "https://graph.microsoft.com/v1.0/me",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=15,
+        )
+        me_r.raise_for_status()
+        me = me_r.json()
+        display_name = me.get("displayName", "Unknown")
+        account_id   = me.get("id", "")
+        tenant       = me.get("userPrincipalName", "").split("@")[-1] or "teams"
+    except Exception:
+        display_name = "Unknown"
+        account_id   = ""
+        tenant       = "teams"
+
+    account = {
+        "display_name":  display_name,
+        "account_id":    account_id,
+        "tenant":        tenant,
+        "access_token":  access_token,
+        "refresh_token": refresh_token or "",
+    }
+
+    with db_lock:
+        existing = settings_tbl.get(doc_id=1) or {}
+    tokens = [t for t in existing.get("teams_user_tokens", []) if t.get("account_id") != account_id]
+    tokens.append(account)
+    existing["teams_user_tokens"] = tokens
+
+    with db_lock:
+        if settings_tbl.get(doc_id=1):
+            settings_tbl.update(existing, doc_ids=[1])
+        else:
+            settings_tbl.insert(existing)
+
+    config.apply_overrides(existing)
+    return Response(status_code=302, headers={"Location": "/page/?teams_connected=1"})
+
+
+@app.get("/teams/workspaces")
+def get_teams_workspaces():
+    with db_lock:
+        existing = settings_tbl.get(doc_id=1) or {}
+    tokens = existing.get("teams_user_tokens", [])
+    return [
+        {"display_name": t.get("display_name", "Unknown"), "account_id": t.get("account_id", ""), "tenant": t.get("tenant", "")}
+        for t in tokens
+    ]
+
+
+@app.delete("/teams/workspaces/{account_id}")
+def disconnect_teams_account(account_id: str):
+    with db_lock:
+        existing = settings_tbl.get(doc_id=1) or {}
+    tokens = [t for t in existing.get("teams_user_tokens", []) if t.get("account_id") != account_id]
+    existing["teams_user_tokens"] = tokens
     with db_lock:
         if settings_tbl.get(doc_id=1):
             settings_tbl.update(existing, doc_ids=[1])

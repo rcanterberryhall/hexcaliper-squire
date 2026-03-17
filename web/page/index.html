@@ -74,6 +74,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .src-btn.on-slack   { border-color: var(--purple); color: var(--purple); background: rgba(204,51,0,.08); }
 .src-btn.on-github  { border-color: var(--text);   color: var(--text);   background: rgba(240,228,224,.06); }
 .src-btn.on-jira    { border-color: var(--amber);  color: var(--amber);  background: rgba(255,176,32,.08); }
+.src-btn.on-teams   { border-color: #6264a7;       color: #6264a7;       background: rgba(98,100,167,.08); }
 .scan-btn {
   font-family: var(--display); font-size: 11px; font-weight: 700; letter-spacing: .12em;
   text-transform: uppercase; padding: 6px 16px; border: 1px solid var(--accent);
@@ -622,6 +623,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
         <button class="src-btn on-slack"   data-src="slack"   onclick="toggleSrc(this)">Slack</button>
         <button class="src-btn on-github"  data-src="github"  onclick="toggleSrc(this)">GitHub</button>
         <button class="src-btn on-jira"    data-src="jira"    onclick="toggleSrc(this)">Jira</button>
+        <button class="src-btn on-teams"  data-src="teams"   onclick="toggleSrc(this)">Teams</button>
       </div>
       <button class="gear-btn" onclick="openSettings()" title="Settings">⚙</button>
       <button class="scan-btn" id="scanBtn" onclick="startScan()">▶ Scan</button>
@@ -791,6 +793,17 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
     </div>
 
     <div class="settings-section">
+      <div class="section-head"><div class="sdot2" id="dot-teams"></div>Microsoft Teams</div>
+      <div class="field-row">
+        <div class="field"><label>Client ID</label><input type="text" id="s-teams_client_id" placeholder="your-azure-app-client-id"></div>
+        <div class="field"><label>Client Secret</label><span id="s-teams_client_secret-slot"></span></div>
+      </div>
+      <div class="field-hint" style="margin-bottom:10px">Register an app in Azure AD (portal.azure.com), add <em>Chat.Read</em>, <em>ChannelMessage.Read.All</em>, <em>Channel.ReadBasic.All</em> delegated permissions, set redirect URL to https://squire.hexcaliper.com/page/api/teams/callback, then connect your account below.</div>
+      <div id="teams-accounts"></div>
+      <button class="connect-btn" onclick="connectTeams()">+ Connect Account</button>
+    </div>
+
+    <div class="settings-section">
       <div class="section-head"><div class="sdot2" id="dot-github"></div>GitHub</div>
       <div class="field-row">
         <div class="field"><label>Personal Access Token</label><span id="s-github_pat-slot"></span></div>
@@ -820,7 +833,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 
 <script>
 const API = '/page/api';
-let activeSrcs      = new Set(['outlook','slack','github','jira']);
+let activeSrcs      = new Set(['outlook','slack','github','jira','teams']);
 let priFilter       = 'all';
 let srcFilter       = 'all';
 let typeFilter      = 'all';
@@ -1699,17 +1712,19 @@ function _endColResize() {
 const SETTINGS_FIELDS = [
   'ollama_url','ollama_model','cf_client_id','cf_client_secret',
   'slack_client_id','slack_client_secret',
+  'teams_client_id','teams_client_secret',
   'github_pat','github_username',
   'jira_email','jira_token','jira_domain','jira_jql','lookback_hours',
   'user_name','user_email','focus_topics',
 ];
-const SECRET_FIELDS = new Set(['cf_client_id','cf_client_secret','slack_client_secret','github_pat','jira_token']);
+const SECRET_FIELDS = new Set(['cf_client_id','cf_client_secret','slack_client_secret','teams_client_secret','github_pat','jira_token']);
 const SECRET_FIELD_DEFS = [
-  { id: 'cf_client_id',       placeholder: 'leave blank if no Access policy' },
-  { id: 'cf_client_secret',   placeholder: 'leave blank if no Access policy' },
-  { id: 'slack_client_secret',placeholder: 'your-app-client-secret' },
-  { id: 'github_pat',         placeholder: 'ghp_…' },
-  { id: 'jira_token',         placeholder: 'your-jira-api-token' },
+  { id: 'cf_client_id',         placeholder: 'leave blank if no Access policy' },
+  { id: 'cf_client_secret',     placeholder: 'leave blank if no Access policy' },
+  { id: 'slack_client_secret',  placeholder: 'your-app-client-secret' },
+  { id: 'teams_client_secret',  placeholder: 'your-azure-app-client-secret' },
+  { id: 'github_pat',           placeholder: 'ghp_…' },
+  { id: 'jira_token',           placeholder: 'your-jira-api-token' },
 ];
 
 function _injectSecretFields() {
@@ -1765,6 +1780,7 @@ async function loadSettings() {
     $('noise-clear-btn').style.display = nc > 0 ? '' : 'none';
     updateSectionDots(s.warnings || []);
     loadSlackWorkspaces();
+    loadTeamsAccounts();
   } catch(e) { console.warn('loadSettings:', e); }
 }
 
@@ -1789,6 +1805,35 @@ async function disconnectSlack(teamId) {
   catch(e) { console.warn('disconnectSlack:', e); }
 }
 
+async function loadTeamsAccounts() {
+  try {
+    const accounts = await api('/teams/workspaces');
+    const el = $('teams-accounts');
+    if (!accounts.length) {
+      el.innerHTML = '<div class="field-hint" style="margin-bottom:8px">No accounts connected yet.</div>';
+      return;
+    }
+    el.innerHTML = accounts.map(a => `
+      <div class="workspace-row">
+        <span class="workspace-name">✓ ${esc(a.display_name)} <span style="opacity:.6;font-size:10px">(${esc(a.tenant)})</span></span>
+        <button class="ia del" onclick="disconnectTeams('${esc(a.account_id)}')">✕ Disconnect</button>
+      </div>`).join('');
+  } catch(e) { console.warn('loadTeamsAccounts:', e); }
+}
+
+async function disconnectTeams(accountId) {
+  try { await api('/teams/workspaces/' + accountId, 'DELETE'); loadTeamsAccounts(); }
+  catch(e) { console.warn('disconnectTeams:', e); }
+}
+
+async function connectTeams() {
+  const body = {};
+  SETTINGS_FIELDS.forEach(f => { const el = $('s-' + f); if (el && (!SECRET_FIELDS.has(f) || el.value)) body[f] = el.value; });
+  body.projects = readProjects();
+  try { await api('/settings', 'POST', body); } catch(e) {}
+  window.location.href = '/page/api/teams/connect';
+}
+
 async function connectSlack() {
   // Persist settings first so the callback endpoint can use them
   const body = {};
@@ -1802,6 +1847,7 @@ function updateSectionDots(warnings) {
   const has = kw => warnings.some(w => w.includes(kw));
   $('dot-ollama').className = 'sdot2' + (has('CF_CLIENT') ? ' warn' : ' ok');
   $('dot-slack').className  = 'sdot2' + (has('SLACK')    ? ' warn' : ' ok');
+  $('dot-teams').className  = 'sdot2' + (has('TEAMS')    ? ' warn' : ' ok');
   $('dot-github').className = 'sdot2' + (has('GITHUB')   ? ' warn' : ' ok');
   $('dot-jira').className   = 'sdot2' + (has('JIRA')     ? ' warn' : ' ok');
 }
@@ -2022,7 +2068,7 @@ loadItems();
 loadSituations();
 loadProjectList();
 
-// Handle Slack OAuth redirect result
+// Handle OAuth redirect results
 (function() {
   const p = new URLSearchParams(window.location.search);
   if (p.get('slack_connected')) {
@@ -2032,6 +2078,14 @@ loadProjectList();
   } else if (p.get('slack_error')) {
     history.replaceState({}, '', '/page/');
     $('statusMsg').textContent = 'Slack connect failed: ' + p.get('slack_error');
+    openSettings();
+  } else if (p.get('teams_connected')) {
+    history.replaceState({}, '', '/page/');
+    $('statusMsg').textContent = 'Teams account connected.';
+    openSettings();
+  } else if (p.get('teams_error')) {
+    history.replaceState({}, '', '/page/');
+    $('statusMsg').textContent = 'Teams connect failed: ' + p.get('teams_error');
     openSettings();
   }
 })();

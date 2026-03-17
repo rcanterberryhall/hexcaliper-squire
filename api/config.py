@@ -14,6 +14,9 @@ Slack:
     ``SLACK_CLIENT_ID``, ``SLACK_CLIENT_SECRET``, ``SLACK_USER_TOKENS``,
     ``SLACK_BOT_TOKEN``, ``SLACK_CHANNELS``
 
+Microsoft Teams:
+    ``TEAMS_CLIENT_ID``, ``TEAMS_CLIENT_SECRET``, ``TEAMS_USER_TOKENS``
+
 GitHub:
     ``GITHUB_PAT``, ``GITHUB_USERNAME``
 
@@ -73,6 +76,14 @@ SLACK_USER_TOKENS: list[dict] = []
 SLACK_BOT_TOKEN = _get("SLACK_BOT_TOKEN")
 _sc             = _get("SLACK_CHANNELS")
 SLACK_CHANNELS  = [c.strip() for c in _sc.split(",") if c.strip()] if _sc else []
+
+# ── Microsoft Teams ──────────────────────────────────────────────────────────
+
+TEAMS_CLIENT_ID     = _get("TEAMS_CLIENT_ID")
+TEAMS_CLIENT_SECRET = _get("TEAMS_CLIENT_SECRET")
+
+# Per-account user tokens stored after OAuth — populated at runtime via apply_overrides.
+TEAMS_USER_TOKENS: list[dict] = []
 
 # ── GitHub ────────────────────────────────────────────────────────────────────
 
@@ -135,6 +146,8 @@ def apply_overrides(d: dict) -> None:
         "slack_client_id":      "SLACK_CLIENT_ID",
         "slack_client_secret":  "SLACK_CLIENT_SECRET",
         "slack_bot_token":      "SLACK_BOT_TOKEN",
+        "teams_client_id":      "TEAMS_CLIENT_ID",
+        "teams_client_secret":  "TEAMS_CLIENT_SECRET",
         "github_pat":           "GITHUB_PAT",
         "github_username":      "GITHUB_USERNAME",
         "jira_email":           "JIRA_EMAIL",
@@ -149,6 +162,8 @@ def apply_overrides(d: dict) -> None:
             setattr(mod, var, str(d[key]))
     if "slack_user_tokens" in d and isinstance(d["slack_user_tokens"], list):
         setattr(mod, "SLACK_USER_TOKENS", d["slack_user_tokens"])
+    if "teams_user_tokens" in d and isinstance(d["teams_user_tokens"], list):
+        setattr(mod, "TEAMS_USER_TOKENS", d["teams_user_tokens"])
     if "slack_channels" in d:
         sc = d["slack_channels"] or ""
         setattr(mod, "SLACK_CHANNELS", [c.strip() for c in sc.split(",") if c.strip()])

@@ -12,6 +12,7 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 COPY app.py config.py models.py agent.py \
      connector_slack.py connector_github.py \
      connector_jira.py connector_outlook.py \
+     connector_teams.py \
      embedder.py .
 
 EXPOSE 8001

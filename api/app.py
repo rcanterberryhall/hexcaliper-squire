@@ -46,6 +46,7 @@ import connector_github
 import connector_jira
 import connector_outlook
 import connector_teams
+import correlator as _correlator
 
 app = FastAPI(title="Hexcaliper Squire API", version="1.0.0")
 
@@ -138,8 +139,7 @@ def _save_analysis(a: Analysis) -> None:
         existing_situation_id = (existing or {}).get("situation_id")
 
         # Extract cross-source references
-        from correlator import extract_references
-        refs = extract_references(a.title, a.body_preview or "")
+        refs = _correlator.extract_references(a.title, a.body_preview or "")
 
         analyses.upsert(
             {
@@ -782,11 +782,11 @@ def _maybe_form_situation(item_id: str) -> None:
     create or update a Situation record accordingly.
     """
     try:
-        from correlator import find_correlated_candidates, score_situation, synthesize_situation
         from embedder import get_item_vector
 
         with db_lock:
-            record = analyses.get(Q.item_id == item_id)
+            record       = analyses.get(Q.item_id == item_id)
+            all_analyses = analyses.all()
         if not record:
             return
 
@@ -798,7 +798,7 @@ def _maybe_form_situation(item_id: str) -> None:
 
         vector     = get_item_vector(item_id)
         project    = record.get("project_tag")
-        candidates = find_correlated_candidates(item_id, refs, vector or [], project)
+        candidates = _correlator.find_correlated_candidates(item_id, refs, vector or [], project, all_analyses)
 
         if not candidates:
             # No new correlations — but rescore existing situation if item is already in one
@@ -890,16 +890,14 @@ def _maybe_form_situation(item_id: str) -> None:
 def _update_situation_record(sit_id: str, item_ids: list) -> None:
     """Reload cluster records and recompute score + synthesis for an existing situation."""
     try:
-        from correlator import score_situation, synthesize_situation
-
         with db_lock:
             cluster_records = [analyses.get(Q.item_id == iid) for iid in item_ids]
         cluster_records = [r for r in cluster_records if r]
         if not cluster_records:
             return
 
-        synthesis   = synthesize_situation(cluster_records, config.USER_NAME or "the user")
-        score       = score_situation(item_ids, cluster_records)
+        synthesis   = _correlator.synthesize_situation(cluster_records, config.USER_NAME or "the user")
+        score       = _correlator.score_situation(item_ids, cluster_records)
         max_pri     = max(cluster_records, key=lambda r: _pri_rank(r.get("priority", "low")))
         all_refs    = list(set(r for rec in cluster_records
                                for raw in [rec.get("references")]
@@ -934,7 +932,6 @@ def _update_situation_record(sit_id: str, item_ids: list) -> None:
 def _rescore_situation(sit_id: str) -> None:
     """Recompute only the score (not synthesis) for a single situation."""
     try:
-        from correlator import score_situation
         with db_lock:
             sit = situations_tbl.get(Q.situation_id == sit_id)
         if not sit:
@@ -945,7 +942,7 @@ def _rescore_situation(sit_id: str) -> None:
         cluster_records = [r for r in cluster_records if r]
         if not cluster_records:
             return
-        score = score_situation(item_ids, cluster_records)
+        score = _correlator.score_situation(item_ids, cluster_records)
         with db_lock:
             situations_tbl.update(
                 {"score": score, "score_updated_at": now_iso()},

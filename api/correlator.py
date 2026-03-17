@@ -53,8 +53,8 @@ def find_correlated_candidates(
     references: list,
     vector: list,
     project_tag,
+    all_analyses: list,
     similarity_threshold: float = 0.82,
-    min_embedding_count: int = 1,
 ) -> list:
     """
     Return item_ids of analyses likely describing the same situation.
@@ -65,19 +65,17 @@ def find_correlated_candidates(
        >= similarity_threshold to this item's vector, within the same
        project_tag (or both untagged).
 
+    ``all_analyses`` must be provided by the caller (pre-fetched under db_lock)
+    to avoid opening a second TinyDB instance concurrently with the main app.
+
     Returns deduplicated list of item_ids excluding the query item itself.
     """
-    from tinydb import TinyDB, Query
-    import os
-    db = TinyDB(config.DB_PATH)
-    analyses_tbl = db.table("analyses")
-
     candidates = set()
 
     # Pass 1: deterministic reference matching
     if references:
         ref_set = set(r.lower() for r in references)
-        for rec in analyses_tbl.all():
+        for rec in all_analyses:
             if rec.get("item_id") == item_id:
                 continue
             raw = rec.get("references")
@@ -96,7 +94,7 @@ def find_correlated_candidates(
             import numpy as np
             from embedder import get_item_vector
             v = np.array(vector)
-            for rec in analyses_tbl.all():
+            for rec in all_analyses:
                 cid = rec.get("item_id")
                 if not cid or cid == item_id:
                     continue

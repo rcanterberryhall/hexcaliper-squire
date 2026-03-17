@@ -13,7 +13,7 @@ COPY app.py config.py models.py agent.py \
      connector_slack.py connector_github.py \
      connector_jira.py connector_outlook.py \
      connector_teams.py \
-     embedder.py .
+     embedder.py correlator.py .
 
 EXPOSE 8001
 

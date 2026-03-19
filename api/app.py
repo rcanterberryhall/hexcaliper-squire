@@ -1590,8 +1590,19 @@ def _run_seed_job(context: str) -> None:
 
         passdown_count = sum(1 for a in all_items if a.get("is_passdown"))
         n_items        = len(all_items)
-        batch_size     = 6
-        n_batches      = max(1, (n_items + batch_size - 1) // batch_size)
+
+        if n_items == 0:
+            _seed_job = {
+                "status":     "error",
+                "progress":   "No items to analyse. Run the sidecar (or a scan) to ingest emails first, then seed.",
+                "projects":   [],
+                "topics":     [],
+                "item_count": 0,
+            }
+            return
+
+        batch_size = 6
+        n_batches  = max(1, (n_items + batch_size - 1) // batch_size)
 
         _seed_job["progress"] = f"Analysing {n_items} items ({passdown_count} passdowns)…"
 

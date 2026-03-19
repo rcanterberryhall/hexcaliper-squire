@@ -115,11 +115,12 @@ class Analysis:
     project_tag:    Optional[str]  = None
     goals:          list[str]      = field(default_factory=list)
     key_dates:      list[dict]     = field(default_factory=list)
-    body_preview:   str            = ""
-    to_field:       str            = ""
-    cc_field:       str            = ""
-    is_replied:     bool           = False
-    replied_at:     Optional[str]  = None
+    body_preview:      str            = ""
+    to_field:          str            = ""
+    cc_field:          str            = ""
+    is_replied:        bool           = False
+    replied_at:        Optional[str]  = None
+    information_items: list[dict]     = field(default_factory=list)
 
 
 @dataclass

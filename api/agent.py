@@ -42,7 +42,7 @@ User context:
 - Active projects: {projects_ctx}
 - Watch topics: {topics_ctx}
 - Noise/irrelevant topics: {noise_ctx} — if content is primarily about these with no direct relevance to {user_name}, set category="noise", priority="low", has_action=false
-{sender_hint}{replied_hint}{embedding_hint}
+{sender_hint}{replied_hint}{manual_tag_hint}{embedding_hint}
 Analyze this item and extract structured information.
 
 Source: {source}
@@ -75,6 +75,12 @@ Respond ONLY with valid JSON. No explanation, no markdown fences.
     {{
       "date": "ISO date, descriptive date, or null",
       "description": "what this date represents"
+    }}
+  ],
+  "information_items": [
+    {{
+      "fact": "specific piece of information worth noting",
+      "relevance": "why this matters — project context, current state, or background"
     }}
   ],
   "summary": "one sentence — what this is and what needs to happen",
@@ -120,9 +126,19 @@ Priority rules:
 
 Action item rules:
 - owner="me" ONLY when the action is specifically for {user_name}
+- An imperative or direct question aimed at {user_name} is required for owner="me"
+- Past-tense reports of completed work (e.g. "we installed X", "the issue was resolved") are NOT action items — put them in information_items instead
 - Jira issues: has_action=true unless status is Done/Closed
 - GitHub PR review requests: has_action=true, category=review
 - Slack DMs: bias toward has_action=true
+
+Information item rules:
+- Extract key facts, status updates, and completed actions that are worth knowing but are NOT tasks for {user_name}
+- Examples: "RV08 seat belt issues resolved", "zip ties were installed on RV5/11/18", "SAT testing scheduled for tomorrow morning"
+- If {user_name} is CC'd only and the body describes completed work or a status update → put findings in information_items, not action_items
+- Passdown notes are especially rich sources: extract every piece of operational status, equipment state, ongoing concern, or shift observation as a separate information_item
+- Do NOT duplicate content across both action_items and information_items
+- Leave information_items empty if there is nothing factual worth preserving
 """
 
 
@@ -337,6 +353,18 @@ def analyze(item: RawItem) -> Analysis:
     else:
         sender_hint = ""
 
+    # Manual tag hint — when re-analyzing an item the user has already tagged,
+    # surface that decision directly so the LLM can reinforce it.
+    _manual_tag = item.metadata.get("project_tag")
+    if _manual_tag:
+        manual_tag_hint = (
+            f"\n- Manual project tag: the user has tagged this item to project "
+            f"\"{_manual_tag}\". Treat this as a strong signal for project_tag "
+            f"and hierarchy assignment."
+        )
+    else:
+        manual_tag_hint = ""
+
     if is_replied:
         _when = f" (at {replied_at})" if replied_at else ""
         replied_hint = (
@@ -395,9 +423,10 @@ def analyze(item: RawItem) -> Analysis:
                 noise_ctx    = _noise_ctx(),
                 to_field     = to_field,
                 cc_field     = cc_field,
-                sender_hint    = sender_hint,
-                replied_hint   = replied_hint,
-                embedding_hint = embedding_hint,
+                sender_hint     = sender_hint,
+                replied_hint    = replied_hint,
+                manual_tag_hint = manual_tag_hint,
+                embedding_hint  = embedding_hint,
             ),
             "stream":  False,
             "format":  "json",
@@ -430,29 +459,36 @@ def analyze(item: RawItem) -> Analysis:
             owner       = "me",
         )]
 
+    information_items = [
+        {"fact": i.get("fact", ""), "relevance": i.get("relevance", "")}
+        for i in data.get("information_items", [])
+        if i.get("fact")
+    ]
+
     return Analysis(
-        item_id        = item.item_id,
-        source         = item.source,
-        title          = item.title,
-        author         = item.author,
-        timestamp      = item.timestamp,
-        url            = item.url,
-        has_action     = data.get("has_action", bool(action_items)),
-        priority       = data.get("priority", "medium"),
-        category       = data.get("category", "fyi"),
-        action_items   = action_items,
-        summary        = data.get("summary", item.title),
-        urgency_reason = data.get("urgency_reason"),
-        hierarchy      = data.get("hierarchy", item.metadata.get("hierarchy", "general")),
-        is_passdown    = _detect_passdown(item.title, item.body) or bool(data.get("is_passdown", False)),
-        project_tag    = data.get("project_tag") or item.metadata.get("project_tag"),
-        goals          = [g for g in data.get("goals", []) if isinstance(g, str) and g],
-        key_dates      = [d for d in data.get("key_dates", []) if isinstance(d, dict)],
-        body_preview   = item.body[:2000],
-        to_field       = to_field,
-        cc_field       = cc_field,
-        is_replied     = is_replied,
-        replied_at     = replied_at,
+        item_id           = item.item_id,
+        source            = item.source,
+        title             = item.title,
+        author            = item.author,
+        timestamp         = item.timestamp,
+        url               = item.url,
+        has_action        = data.get("has_action", bool(action_items)),
+        priority          = data.get("priority", "medium"),
+        category          = data.get("category", "fyi"),
+        action_items      = action_items,
+        summary           = data.get("summary", item.title),
+        urgency_reason    = data.get("urgency_reason"),
+        hierarchy         = data.get("hierarchy", item.metadata.get("hierarchy", "general")),
+        is_passdown       = _detect_passdown(item.title, item.body) or bool(data.get("is_passdown", False)),
+        project_tag       = data.get("project_tag") or item.metadata.get("project_tag"),
+        goals             = [g for g in data.get("goals", []) if isinstance(g, str) and g],
+        key_dates         = [d for d in data.get("key_dates", []) if isinstance(d, dict)],
+        body_preview      = item.body[:2000],
+        to_field          = to_field,
+        cc_field          = cc_field,
+        is_replied        = is_replied,
+        replied_at        = replied_at,
+        information_items = information_items,
     )
 
 

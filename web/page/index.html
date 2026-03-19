@@ -156,7 +156,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 #situations-view { flex: 1; overflow-y: auto; padding: 12px 18px; display: none; position: relative; }
 
 /* Watermark crest */
-#todo-view::before, #items-view::before, #situations-view::before {
+#todo-view::before, #intel-view::before, #items-view::before, #situations-view::before {
   content: '';
   position: absolute; top: 0; left: 0; right: 0; bottom: 0;
   background: url('/page/squire-crest.svg') no-repeat center center;
@@ -165,7 +165,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
   pointer-events: none;
   z-index: 0;
 }
-#todo-view > *, #items-view > *, #situations-view > * { position: relative; z-index: 1; }
+#todo-view > *, #intel-view > *, #items-view > *, #situations-view > * { position: relative; z-index: 1; }
 
 /* ── Todo groups ── */
 .group-label {
@@ -489,6 +489,25 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .status-needs_decision { background: rgba(212,160,23,.1);   color: var(--gold);  border: 1px solid rgba(212,160,23,.25); }
 .status-informational  { background: rgba(110,80,80,.1);    color: var(--muted); border: 1px solid var(--border); }
 .stat-situations { grid-column: 1 / -1; }
+.stat-intel      { grid-column: 1 / -1; }
+
+/* ── Intel cards ── */
+#intel-view { flex: 1; overflow-y: auto; padding: 12px 18px; display: none; position: relative; }
+.intel-group { margin-bottom: 18px; }
+.intel-group-label { font-size: 9px; letter-spacing: .18em; color: var(--muted); text-transform: uppercase; margin-bottom: 6px; padding: 0 2px; }
+.intel-card {
+  border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: var(--r); background: var(--surface);
+  padding: 9px 12px; margin-bottom: 6px;
+  display: flex; gap: 10px; align-items: flex-start;
+  animation: fadein .2s ease;
+}
+.intel-card:hover { border-color: var(--accent); }
+.intel-body { flex: 1; min-width: 0; cursor: pointer; }
+.intel-fact { font-size: 12px; color: var(--text); line-height: 1.4; margin-bottom: 4px; }
+.intel-relevance { font-size: 10px; color: var(--muted); font-style: italic; margin-bottom: 5px; line-height: 1.4; }
+.intel-meta { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+.intel-actions { display: flex; gap: 4px; flex-shrink: 0; }
 
 /* ── Detail panel ── */
 .detail-panel {
@@ -584,7 +603,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 
   /* Main content fills full width */
   .main { overflow: visible; }
-  #todo-view, #items-view, #situations-view { overflow: visible; }
+  #todo-view, #intel-view, #items-view, #situations-view { overflow: visible; }
 
   /* Detail panel: full screen */
   .detail-panel { width: 100%; right: -100%; }
@@ -610,7 +629,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
   .vtabs .vtab  { padding: 5px 10px; }
 
   /* Todo cards */
-  #todo-view, #items-view, #situations-view { padding: 10px 12px; }
+  #todo-view, #intel-view, #items-view, #situations-view { padding: 10px 12px; }
   .todo-meta { gap: 6px; }
 }
 
@@ -661,6 +680,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
         <button class="src-btn on-teams"  data-src="teams"   onclick="toggleSrc(this)">Teams</button>
       </div>
       <button class="scan-btn" id="seedBtn" onclick="openSeed()" title="Bootstrap project intelligence from existing data" style="background:rgba(212,160,23,.08);border-color:var(--amber);color:var(--amber)">◈ Seed</button>
+      <button class="scan-btn" id="reanalyzeBtn" onclick="startReanalyze()" title="Re-run LLM analysis on all stored items with current project settings" style="background:rgba(64,184,255,.06);border-color:var(--blue);color:var(--blue)">↺ Re-analyze</button>
       <button class="gear-btn" onclick="openSettings()" title="Settings">⚙</button>
       <button class="scan-btn" id="scanBtn" onclick="startScan()">▶ Scan</button>
     </div>
@@ -678,7 +698,8 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
           <div class="stat"><div class="stat-val c-amber"  id="st-open">—</div><div class="stat-lbl">Open</div></div>
           <div class="stat"><div class="stat-val c-red"    id="st-high">—</div><div class="stat-lbl">High Pri</div></div>
           <div class="stat"><div class="stat-val c-blue"   id="st-scan">—</div><div class="stat-lbl">Last Scan</div></div>
-          <div class="stat stat-situations"><div class="stat-val c-red" id="st-situations">—</div><div class="stat-lbl">Situations</div></div>
+          <div class="stat"><div class="stat-val c-red" id="st-situations">—</div><div class="stat-lbl">Situations</div></div>
+          <div class="stat stat-intel"><div class="stat-val c-blue" id="st-intel">—</div><div class="stat-lbl">Intel Items</div></div>
         </div>
       </div>
 
@@ -725,6 +746,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
       <div class="main-toolbar">
         <div class="vtabs">
           <button class="vtab active" onclick="setView('todos',this)">Action Items</button>
+          <button class="vtab"        onclick="setView('intel',this)">Current State</button>
           <button class="vtab"        onclick="setView('items',this)">All Items</button>
           <button class="vtab"        onclick="setView('situations',this)">Situations</button>
         </div>
@@ -740,6 +762,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
         <label class="show-done"><input type="checkbox" id="showDone" onchange="loadTodos()"> Show completed</label>
       </div>
       <div id="todo-view"></div>
+      <div id="intel-view"></div>
       <div id="items-view"></div>
       <div id="situations-view"></div>
     </div>
@@ -905,6 +928,7 @@ let scanTimer       = null;
 let allTodos        = [];
 let allAnalyses     = [];
 let allSituations   = [];
+let allIntel        = [];
 let ingestWasActive = false;
 let allProjects = [];
 let colWidths       = {}; // { colIndex: px }
@@ -1013,6 +1037,19 @@ function toggleSrc(btn) {
   else { activeSrcs.add(s); btn.className = `src-btn on-${s}`; }
 }
 
+async function startReanalyze() {
+  try {
+    const { count } = await api('/reanalyze/count');
+    if (!confirm(`Re-analyze all ${count} stored items through the LLM with current project settings?\n\nPassdowns will be processed first. This may take a while.`)) return;
+    await api('/reanalyze', 'POST');
+    $('reanalyzeBtn').textContent = '■ Stop';
+    $('reanalyzeBtn').onclick     = stopScan;  // reuses same cancel endpoint
+    $('spin').classList.add('on');
+    setStatus('scanning');
+    scanTimer = setInterval(pollScan, 1000);
+  } catch (e) { setStatus('error'); $('statusMsg').textContent = `Re-analyze failed: ${e.message}`; }
+}
+
 async function startScan() {
   if (!activeSrcs.size) return;
   try {
@@ -1038,12 +1075,14 @@ async function pollScan() {
     $('statusMsg').textContent = s.message;
     if (!s.running) {
       clearInterval(scanTimer);
-      $('scanBtn').textContent = '▶ Scan';
-      $('scanBtn').onclick     = startScan;
+      $('scanBtn').textContent      = '▶ Scan';
+      $('scanBtn').onclick          = startScan;
+      $('reanalyzeBtn').textContent = '↺ Re-analyze';
+      $('reanalyzeBtn').onclick     = startReanalyze;
       $('spin').classList.remove('on');
       setStatus('ready');
       setTimeout(() => { $('pbar').style.width = '0'; }, 2000);
-      await Promise.all([loadStats(), loadTodos(), loadItems(), loadSituations()]);
+      await Promise.all([loadStats(), loadTodos(), loadIntel(), loadItems(), loadSituations()]);
       updateTypeCounts(allAnalyses);
     }
   } catch (e) { /* keep polling */ }
@@ -1056,6 +1095,7 @@ async function loadStats() {
     $('st-open').textContent  = s.open_todos;
     $('st-high').textContent  = s.high_priority;
     if ($('st-situations')) $('st-situations').textContent = s.open_situations ?? '—';
+    if ($('st-intel'))      $('st-intel').textContent      = s.open_intel      ?? '—';
     if (s.last_scan?.finished_at) $('st-scan').textContent = fmtTime(s.last_scan.finished_at);
     const sm = {};
     (s.by_source || []).forEach(r => sm[r.source] = r.count);
@@ -1466,14 +1506,77 @@ async function resynthSituation(sitId) {
   } catch(e) { $('statusMsg').textContent = 'Resynth failed: ' + e.message; }
 }
 
+// ── Intel (Current State) ──────────────────────────────────────────────────────
+
+async function loadIntel() {
+  try {
+    allIntel = await api('/intel');
+    renderIntel(allIntel);
+    const el = $('st-intel');
+    if (el) el.textContent = allIntel.length;
+  } catch(e) { console.warn('intel:', e); }
+}
+
+function renderIntel(items) {
+  const el = $('intel-view');
+  if (!items.length) {
+    el.innerHTML = `<div class="empty"><div class="empty-icon">◻</div><div class="empty-msg">No current state items yet.\nIntel accumulates as items are scanned — status updates,\ncompleted actions, and key facts will appear here.</div></div>`;
+    return;
+  }
+  // Group by project_tag, then untagged
+  const groups = {};
+  items.forEach(i => {
+    const k = i.project_tag || '—';
+    if (!groups[k]) groups[k] = [];
+    groups[k].push(i);
+  });
+  const sorted = Object.keys(groups).sort((a, b) => a === '—' ? 1 : b === '—' ? -1 : a.localeCompare(b));
+  el.innerHTML = sorted.map(proj => `
+    <div class="intel-group">
+      <div class="intel-group-label">${proj === '—' ? 'Untagged' : esc(proj)}</div>
+      ${groups[proj].map(i => makeIntelCard(i)).join('')}
+    </div>`).join('');
+}
+
+function makeIntelCard(i) {
+  const did  = i.doc_id || 0;
+  const proj = i.project_tag ? `<span class="chip"><span class="badge b-project">${esc(i.project_tag)}</span></span>` : '';
+  const link = i.url ? `<button class="ia open" onclick="window.open('${esc(i.url)}','_blank')" title="Open source">↗</button>` : '';
+  const ts   = i.timestamp ? `<span class="chip" style="color:var(--muted)">${fmtTime(i.timestamp)}</span>` : '';
+  return `<div class="intel-card">
+    <div class="intel-body" onclick="openItemDetail('${esc(i.item_id)}')">
+      <div class="intel-fact">${esc(i.fact)}</div>
+      ${i.relevance ? `<div class="intel-relevance">${esc(i.relevance)}</div>` : ''}
+      <div class="intel-meta">
+        <span class="chip chip-${i.source}">${srcIcon[i.source] || '·'} ${esc(i.source)}</span>
+        <span class="chip" style="color:var(--muted)">${esc(trunc(i.title || '', 38))}</span>
+        ${proj}${ts}
+      </div>
+    </div>
+    <div class="intel-actions">${link}<button class="ia del" onclick="dismissIntel(${did})" title="Dismiss">✕</button></div>
+  </div>`;
+}
+
+async function dismissIntel(id) {
+  try {
+    await api(`/intel/${id}`, 'DELETE');
+    allIntel = allIntel.filter(i => i.doc_id !== id);
+    renderIntel(allIntel);
+    const el = $('st-intel');
+    if (el) el.textContent = allIntel.length;
+  } catch(e) { console.warn('dismissIntel:', e); }
+}
+
 function openItemDetail(itemId) {
   const item = allAnalyses.find(a => a.item_id === itemId);
   if (item) {
     openDetail(item);
     if ($('items-view').style.display === 'none') {
       document.querySelectorAll('.vtab').forEach(e => e.classList.remove('active'));
-      document.querySelectorAll('.vtab')[1].classList.add('active');
+      // Find and activate the "All Items" tab by text content
+      Array.from(document.querySelectorAll('.vtab')).find(t => t.textContent.trim() === 'All Items')?.classList.add('active');
       $('todo-view').style.display       = 'none';
+      $('intel-view').style.display      = 'none';
       $('items-view').style.display      = 'block';
       $('situations-view').style.display = 'none';
     }
@@ -1484,8 +1587,10 @@ function setView(v, el) {
   document.querySelectorAll('.vtab').forEach(e => e.classList.remove('active'));
   el.classList.add('active');
   $('todo-view').style.display       = v === 'todos'      ? 'block' : 'none';
+  $('intel-view').style.display      = v === 'intel'      ? 'block' : 'none';
   $('items-view').style.display      = v === 'items'      ? 'block' : 'none';
   $('situations-view').style.display = v === 'situations' ? 'block' : 'none';
+  if (v === 'intel')      loadIntel();
   if (v === 'items')      loadItems();
   if (v === 'situations') loadSituations();
 }
@@ -2244,7 +2349,7 @@ async function pollStatus() {
       $('spin').classList.remove('on');
       setStatus('ready');
       $('statusMsg').textContent = 'Ready';
-      await Promise.all([loadStats(), loadTodos(), loadItems(), loadSituations()]);
+      await Promise.all([loadStats(), loadTodos(), loadIntel(), loadItems(), loadSituations()]);
     }
   } catch (e) { /* ignore */ }
 }
@@ -2256,6 +2361,7 @@ setTimeout(clearSearch, 500);
 window.addEventListener('pageshow', clearSearch);
 loadStats();
 loadTodos();
+loadIntel();
 loadItems();
 loadSituations();
 loadProjectList();

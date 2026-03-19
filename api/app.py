@@ -67,6 +67,7 @@ scan_logs      = db.table("scan_logs")
 settings_tbl   = db.table("settings")
 embeddings_tbl = db.table("embeddings")
 situations_tbl = db.table("situations")
+intel_tbl      = db.table("intel")
 Q            = Query()
 db_lock      = threading.Lock()
 
@@ -126,9 +127,9 @@ scan_state: dict = {
 }
 
 
-def _save_analysis(a: Analysis) -> None:
+def _save_analysis(a: Analysis, reanalyze: bool = False) -> None:
     """
-    Upsert an ``Analysis`` into TinyDB and create todo rows for action items.
+    Upsert an ``Analysis`` into TinyDB and create todo/intel rows.
 
     Stores all base fields plus the context-aware enrichment fields:
     ``hierarchy``, ``is_passdown``, ``project_tag``, ``goals`` (JSON),
@@ -136,10 +137,16 @@ def _save_analysis(a: Analysis) -> None:
     for action items that do not already exist for the same ``item_id`` and
     ``description`` pair.  Preserves ``situation_id`` and ``references``
     from existing records so the situation layer is not overwritten on re-scan.
+
+    When ``reanalyze=True``, existing todos and intel for this item are
+    removed first so stale entries from prior analysis passes do not persist.
     """
     with db_lock:
         existing = analyses.get(Q.item_id == a.item_id)
         existing_situation_id = (existing or {}).get("situation_id")
+        if reanalyze:
+            todos.remove(Q.item_id == a.item_id)
+            intel_tbl.remove(Q.item_id == a.item_id)
 
         # Extract cross-source references
         refs = _correlator.extract_references(a.title, a.body_preview or "")
@@ -165,8 +172,9 @@ def _save_analysis(a: Analysis) -> None:
                 "is_passdown":   a.is_passdown,
                 "project_tag":   a.project_tag,
                 "goals":         json.dumps(a.goals),
-                "key_dates":     json.dumps(a.key_dates),
-                "body_preview":  a.body_preview,
+                "key_dates":        json.dumps(a.key_dates),
+                "information_items": json.dumps(a.information_items),
+                "body_preview":     a.body_preview,
                 "to_field":      a.to_field,
                 "cc_field":      a.cc_field,
                 "is_replied":    a.is_replied,
@@ -196,6 +204,27 @@ def _save_analysis(a: Analysis) -> None:
                         "done":        False,
                         "created_at":  now_iso(),
                     })
+
+        for item in a.information_items:
+            if not item.get("fact"):
+                continue
+            exists = intel_tbl.get(
+                (Q.item_id == a.item_id) & (Q.fact == item["fact"])
+            )
+            if not exists:
+                intel_tbl.insert({
+                    "item_id":     a.item_id,
+                    "source":      a.source,
+                    "title":       a.title,
+                    "url":         a.url,
+                    "fact":        item["fact"],
+                    "relevance":   item.get("relevance", ""),
+                    "project_tag": a.project_tag,
+                    "priority":    a.priority,
+                    "timestamp":   a.timestamp,
+                    "dismissed":   False,
+                    "created_at":  now_iso(),
+                })
 
 
 def _run_scan(sources: list[str]) -> None:
@@ -277,6 +306,98 @@ def _run_scan(sources: list[str]) -> None:
         scan_state["progress"] = scan_state["total"]
 
 
+def _run_reanalyze() -> None:
+    """
+    Re-run LLM analysis on all stored items using the current config.
+
+    Reconstructs a ``RawItem`` from each stored analysis record (using
+    ``body_preview``, ``to_field``, ``cc_field``, and existing ``project_tag``
+    as a manual-tag hint), passes it through ``analyze()``, then calls
+    ``_save_analysis(reanalyze=True)`` to replace stale todos and intel.
+    Situation formation is re-triggered for each item after save.
+    Reuses ``scan_state`` for progress reporting.
+    """
+    scan_state.update({
+        "running": True, "cancelled": False,
+        "progress": 0, "total": 0, "message": "Loading stored items...",
+    })
+    started = now_iso()
+    try:
+        with db_lock:
+            all_records = analyses.all()
+
+        # Process passdowns first — they are the richest source of operational
+        # current state and their intel should be available when situations
+        # form for subsequent items.
+        all_records.sort(key=lambda r: (0 if r.get("is_passdown") else 1, r.get("timestamp", "")))
+
+        scan_state["total"]   = len(all_records)
+        scan_state["message"] = f"Re-analyzing {len(all_records)} items..."
+
+        results = []
+        for i, rec in enumerate(all_records):
+            if scan_state["cancelled"]:
+                break
+            scan_state.update({
+                "progress":       i,
+                "current_source": rec.get("source", ""),
+                "current_item":   (rec.get("title") or "")[:60],
+                "message":        f"[{rec.get('source','')}] {i + 1}/{len(all_records)}: {(rec.get('title') or '')[:60]}",
+            })
+            item = RawItem(
+                source    = rec.get("source", ""),
+                item_id   = rec.get("item_id", ""),
+                title     = rec.get("title", ""),
+                body      = rec.get("body_preview", "") or rec.get("title", ""),
+                url       = rec.get("url", ""),
+                author    = rec.get("author", ""),
+                timestamp = rec.get("timestamp", now_iso()),
+                metadata  = {
+                    "to":          rec.get("to_field", ""),
+                    "cc":          rec.get("cc_field", ""),
+                    "is_replied":  rec.get("is_replied", False),
+                    "replied_at":  rec.get("replied_at"),
+                    "project_tag": rec.get("project_tag"),
+                    "hierarchy":   rec.get("hierarchy"),
+                },
+            )
+            try:
+                result = analyze(item)
+                results.append(result)
+            except Exception as e:
+                print(f"[reanalyze] {item.item_id}: {e}")
+
+        actions = sum(1 for r in results if r.has_action)
+        for r in results:
+            _save_analysis(r, reanalyze=True)
+            threading.Thread(
+                target=_maybe_form_situation,
+                args=(r.item_id,),
+                daemon=True,
+            ).start()
+
+        status = "cancelled" if scan_state["cancelled"] else "success"
+        with db_lock:
+            scan_logs.insert({
+                "started_at":    started,
+                "finished_at":   now_iso(),
+                "sources":       "reanalyze",
+                "items_scanned": len(results),
+                "actions_found": actions,
+                "status":        status,
+            })
+        scan_state["message"] = (
+            f"Re-analysis complete — {len(results)} items processed, "
+            f"{actions} action items found."
+        )
+    except Exception as e:
+        scan_state["message"] = f"Re-analysis error: {e}"
+        print(f"[reanalyze] {e}")
+    finally:
+        scan_state["running"]  = False
+        scan_state["progress"] = scan_state["total"]
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 _MASK = "•"
@@ -300,6 +421,7 @@ def reset_db():
     with db_lock:
         analyses.truncate()
         todos.truncate()
+        intel_tbl.truncate()
         scan_logs.truncate()
         embeddings_tbl.truncate()
         situations_tbl.truncate()
@@ -663,6 +785,24 @@ def cancel_scan():
     return {"ok": True}
 
 
+@app.post("/reanalyze")
+def start_reanalyze():
+    """Re-run LLM analysis on all stored items with the current config."""
+    if scan_state["running"]:
+        raise HTTPException(status_code=409, detail="A scan or re-analysis is already running.")
+    with db_lock:
+        count = len(analyses.all())
+    threading.Thread(target=_run_reanalyze, daemon=True).start()
+    return {"status": "started", "item_count": count}
+
+
+@app.get("/reanalyze/count")
+def reanalyze_count():
+    """Return the number of stored items that would be re-analyzed."""
+    with db_lock:
+        return {"count": len(analyses.all())}
+
+
 # ── Todos ─────────────────────────────────────────────────────────────────────
 
 @app.get("/todos")
@@ -719,11 +859,47 @@ def delete_todo(doc_id: int):
     return Response(status_code=204)
 
 
+# ── Intel ──────────────────────────────────────────────────────────────────────
+
+@app.get("/intel")
+def get_intel(
+    source:  Optional[str] = None,
+    project: Optional[str] = None,
+):
+    """Return undismissed intel items sorted by timestamp descending."""
+    with db_lock:
+        results = intel_tbl.all()
+    results = [r for r in results if not r.get("dismissed")]
+    if source:
+        results = [r for r in results if r.get("source") == source]
+    if project:
+        results = [r for r in results if r.get("project_tag") == project]
+    results.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+    for r in results:
+        r["doc_id"] = r.doc_id
+    return results
+
+
+@app.delete("/intel/{doc_id}")
+def delete_intel(doc_id: int):
+    with db_lock:
+        intel_tbl.remove(doc_ids=[doc_id])
+    return Response(status_code=204)
+
+
+@app.patch("/intel/{doc_id}")
+def patch_intel(doc_id: int, body: dict):
+    if "dismissed" in body:
+        with db_lock:
+            intel_tbl.update({"dismissed": bool(body["dismissed"])}, doc_ids=[doc_id])
+    return {"ok": True}
+
+
 # ── Analyses ──────────────────────────────────────────────────────────────────
 
 def _deserialize_analysis(a: dict) -> dict:
     """Deserialize JSON-string fields and normalize field names for the frontend."""
-    for field in ("action_items", "goals", "key_dates"):
+    for field in ("action_items", "goals", "key_dates", "information_items"):
         v = a.get(field)
         if isinstance(v, str):
             try:
@@ -903,7 +1079,12 @@ def _update_situation_record(sit_id: str, item_ids: list) -> None:
         if not cluster_records:
             return
 
-        synthesis   = _correlator.synthesize_situation(cluster_records, config.USER_NAME or "the user")
+        with db_lock:
+            cluster_intel = [
+                i for i in intel_tbl.all()
+                if i.get("item_id") in set(item_ids) and not i.get("dismissed")
+            ]
+        synthesis   = _correlator.synthesize_situation(cluster_records, config.USER_NAME or "the user", intel_items=cluster_intel)
         score       = _correlator.score_situation(item_ids, cluster_records)
         max_pri     = max(cluster_records, key=lambda r: _pri_rank(r.get("priority", "low")))
         all_refs    = list(set(r for rec in cluster_records
@@ -1105,12 +1286,14 @@ def get_stats():
         by_category[c] = by_category.get(c, 0) + 1
 
     with db_lock:
-        all_sits = situations_tbl.all()
+        all_sits   = situations_tbl.all()
+        open_intel = [i for i in intel_tbl.all() if not i.get("dismissed")]
 
     return {
         "total_items":           len(all_a),
         "open_todos":            len(open_todos),
         "high_priority":         sum(1 for t in open_todos if t.get("priority") == "high"),
+        "open_intel":            len(open_intel),
         "by_source":             [{"source": k, "count": v} for k, v in by_source.items()],
         "by_category":           [{"category": k, "count": v} for k, v in by_category.items()],
         "last_scan":             logs[0] if logs else None,

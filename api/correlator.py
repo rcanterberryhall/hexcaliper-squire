@@ -168,6 +168,7 @@ The following items from different sources all appear to be about the same situa
 Synthesize them into a single coherent picture.
 
 {items_block}
+{intel_block}
 
 Respond ONLY with valid JSON. No explanation, no markdown fences.
 
@@ -188,12 +189,13 @@ Respond ONLY with valid JSON. No explanation, no markdown fences.
 """
 
 
-def synthesize_situation(item_records: list, user_name: str) -> dict:
+def synthesize_situation(item_records: list, user_name: str, intel_items: list = None) -> dict:
     """
     Call Ollama to produce a cross-source narrative for a situation cluster.
     Falls back to a minimal dict on failure.
 
     items_block: per-item summary lines capped at 6 items × 200 chars each.
+    intel_items: optional list of information_items dicts from the intel table.
     """
     capped = item_records[:6]
     lines = []
@@ -201,6 +203,15 @@ def synthesize_situation(item_records: list, user_name: str) -> dict:
         line = f"[{r.get('source','')}] {r.get('title','')}: {r.get('summary','')[:200]} ({r.get('priority','')}, {r.get('category','')})"
         lines.append(line)
     items_block = "\n".join(lines)
+
+    if intel_items:
+        intel_lines = [
+            f"- [{i.get('source','')}] {i.get('fact','')} ({i.get('relevance','')[:100]})"
+            for i in intel_items[:8]
+        ]
+        intel_block = "Recent status updates and context:\n" + "\n".join(intel_lines) + "\n"
+    else:
+        intel_block = ""
 
     fallback = {
         "title":        _fallback_title(item_records),
@@ -222,6 +233,7 @@ def synthesize_situation(item_records: list, user_name: str) -> dict:
                 "prompt":  SYNTHESIS_PROMPT.format(
                     user_name   = user_name or "the user",
                     items_block = items_block,
+                    intel_block = intel_block,
                 ),
                 "stream":  False,
                 "format":  "json",

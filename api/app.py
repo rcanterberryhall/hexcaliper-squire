@@ -1035,8 +1035,13 @@ def _maybe_form_situation(item_id: str) -> None:
             return
 
         # Create new situation
-        synthesis   = synthesize_situation(cluster_records, config.USER_NAME or "the user")
-        score       = score_situation(all_ids, cluster_records)
+        with db_lock:
+            cluster_intel = [
+                i for i in intel_tbl.all()
+                if i.get("item_id") in set(all_ids) and not i.get("dismissed")
+            ]
+        synthesis   = _correlator.synthesize_situation(cluster_records, config.USER_NAME or "the user", intel_items=cluster_intel)
+        score       = _correlator.score_situation(all_ids, cluster_records)
         max_pri     = max(cluster_records, key=lambda r: _pri_rank(r.get("priority", "low")))
         all_refs    = list(set(r for rec in cluster_records
                                for raw in [rec.get("references")]

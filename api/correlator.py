@@ -33,8 +33,6 @@ def extract_references(title: str, body: str) -> list:
     """
     text = (title or "") + " " + (body or "")
     found = set()
-    for i, pat in enumerate(re.finditer(_REF_PATTERNS[0], text)):
-        found.add(pat.group(1).lower())
     for pat in _REF_PATTERNS[0].finditer(text):
         found.add(pat.group(1).lower())
     for pat in _REF_PATTERNS[1].finditer(text):

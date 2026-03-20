@@ -1335,9 +1335,11 @@ function setType(t, el) {
   if ($('items-view').style.display !== 'none') return;
   if (t === 'passdown') {
     document.querySelectorAll('.vtab').forEach(e => e.classList.remove('active'));
-    document.querySelectorAll('.vtab')[1].classList.add('active');
-    $('todo-view').style.display  = 'none';
-    $('items-view').style.display = 'block';
+    Array.from(document.querySelectorAll('.vtab')).find(t => t.textContent.trim() === 'All Items')?.classList.add('active');
+    $('todo-view').style.display       = 'none';
+    $('intel-view').style.display      = 'none';
+    $('items-view').style.display      = 'block';
+    $('situations-view').style.display = 'none';
     loadItems();
   }
 }
@@ -1360,9 +1362,11 @@ function setProject(p, el) {
 function _switchToItems() {
   if ($('items-view').style.display !== 'none') return;
   document.querySelectorAll('.vtab').forEach(e => e.classList.remove('active'));
-  document.querySelectorAll('.vtab')[1].classList.add('active');
-  $('todo-view').style.display  = 'none';
-  $('items-view').style.display = 'block';
+  Array.from(document.querySelectorAll('.vtab')).find(t => t.textContent.trim() === 'All Items')?.classList.add('active');
+  $('todo-view').style.display       = 'none';
+  $('intel-view').style.display      = 'none';
+  $('items-view').style.display      = 'block';
+  $('situations-view').style.display = 'none';
 }
 
 function onSearch(val) {
@@ -1601,10 +1605,6 @@ document.querySelector('.sidebar').addEventListener('click', e => {
 
 function findAnalysis(itemId) {
   return allAnalyses.find(a => a.item_id === itemId) || null;
-}
-
-function openItemDetail(itemId) {
-  openDetail(findAnalysis(itemId));
 }
 
 async function openTodoDetail(itemId) {

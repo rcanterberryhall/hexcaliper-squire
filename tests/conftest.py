@@ -13,7 +13,7 @@ os.environ["DB_PATH"] = os.path.join(_tmp, "test.db")
 import pytest
 from fastapi.testclient import TestClient
 import app as _app
-from app import app, analyses, todos, scan_logs, settings_tbl
+from app import app, analyses, todos, scan_logs, settings_tbl, situations_tbl, intel_tbl, embeddings_tbl
 import config
 
 
@@ -29,6 +29,9 @@ def clear_db():
     todos.truncate()
     scan_logs.truncate()
     settings_tbl.truncate()
+    situations_tbl.truncate()
+    intel_tbl.truncate()
+    embeddings_tbl.truncate()
     config.PROJECTS = []
     config.FOCUS_TOPICS = []
     config.NOISE_KEYWORDS = []

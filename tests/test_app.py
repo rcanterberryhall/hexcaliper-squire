@@ -4,6 +4,16 @@ from unittest.mock import patch
 
 import pytest
 from app import todos, analyses, scan_logs, scan_state
+from models import Analysis
+
+
+def _mock_analysis(item_id="x1", source="outlook"):
+    return Analysis(
+        item_id=item_id, source=source, title="T", author="a",
+        timestamp="2024-01-01T00:00:00", url="", has_action=False,
+        priority="low", category="fyi", action_items=[], summary="S",
+        urgency_reason=None,
+    )
 
 
 # ── /health ───────────────────────────────────────────────────────────────────
@@ -32,7 +42,7 @@ def _item(item_id="x1", source="outlook"):
 
 
 def test_ingest_returns_received_count(client):
-    with patch("app.analyze_batch", return_value=[]):
+    with patch("app.analyze", return_value=_mock_analysis()):
         r = client.post("/ingest", json={"items": [_item("a"), _item("b")]})
     assert r.status_code == 200
     assert r.json()["received"] == 2
@@ -40,7 +50,7 @@ def test_ingest_returns_received_count(client):
 
 
 def test_ingest_skips_items_without_item_id(client):
-    with patch("app.analyze_batch", return_value=[]):
+    with patch("app.analyze", return_value=_mock_analysis()):
         r = client.post("/ingest", json={"items": [{"source": "outlook", "title": "no id"}]})
     assert r.json()["received"] == 0
     assert r.json()["skipped"] == 1
@@ -51,7 +61,7 @@ def test_ingest_deduplicates_already_processed(client):
     from app import analyses, Q
     analyses.insert({"item_id": "dup1", "source": "outlook"})
 
-    with patch("app.analyze_batch", return_value=[]):
+    with patch("app.analyze", return_value=_mock_analysis()):
         r = client.post("/ingest", json={"items": [_item("dup1"), _item("new1")]})
 
     assert r.json()["skipped"] == 1
@@ -225,7 +235,7 @@ def test_scan_starts_and_returns_sources(client):
          patch("app.connector_github.fetch", return_value=[]), \
          patch("app.connector_jira.fetch", return_value=[]), \
          patch("app.connector_outlook.fetch", return_value=[]), \
-         patch("app.analyze_batch", return_value=[]):
+         patch("app.analyze", return_value=_mock_analysis()):
         r = client.post("/scan", json={"sources": ["github", "slack"]})
 
     assert r.status_code == 200

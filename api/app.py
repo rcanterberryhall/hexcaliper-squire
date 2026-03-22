@@ -118,14 +118,15 @@ def now_iso() -> str:
 # ── Scan state ────────────────────────────────────────────────────────────────
 
 scan_state: dict = {
-    "running":        False,
-    "cancelled":      False,
-    "progress":       0,
-    "total":          0,
-    "current_source": "",
-    "current_item":   "",
-    "message":        "idle",
-    "ingest_pending": 0,
+    "running":            False,
+    "cancelled":          False,
+    "progress":           0,
+    "total":              0,
+    "current_source":     "",
+    "current_item":       "",
+    "message":            "idle",
+    "ingest_pending":     0,
+    "situations_pending": 0,
 }
 
 
@@ -150,6 +151,21 @@ def _save_analysis(a: Analysis, reanalyze: bool = False) -> None:
             todos.remove(Q.item_id == a.item_id)
             intel_tbl.remove(Q.item_id == a.item_id)
 
+        # Preserve user-edited fields so manual overrides survive re-scans.
+        # On reanalyze the LLM runs fresh, but user overrides still win.
+        # Use `or` (not .get default) so a stored None falls through to the
+        # LLM's freshly assigned value — items with no tag can get tagged.
+        if existing:
+            priority    = existing.get("priority")    or a.priority
+            category    = existing.get("category")    or a.category
+            project_tag = existing.get("project_tag") or a.project_tag
+            is_passdown = existing.get("is_passdown") or a.is_passdown
+        else:
+            priority    = a.priority
+            category    = a.category
+            project_tag = a.project_tag
+            is_passdown = a.is_passdown
+
         # Extract cross-source references
         refs = _correlator.extract_references(a.title, a.body_preview or "")
 
@@ -162,8 +178,8 @@ def _save_analysis(a: Analysis, reanalyze: bool = False) -> None:
                 "timestamp":     a.timestamp,
                 "url":           a.url,
                 "has_action":    a.has_action,
-                "priority":      a.priority,
-                "category":      a.category,
+                "priority":      priority,
+                "category":      category,
                 "summary":       a.summary,
                 "urgency":       a.urgency_reason,
                 "action_items":  json.dumps([
@@ -171,8 +187,8 @@ def _save_analysis(a: Analysis, reanalyze: bool = False) -> None:
                     for x in a.action_items
                 ]),
                 "hierarchy":     a.hierarchy,
-                "is_passdown":   a.is_passdown,
-                "project_tag":   a.project_tag,
+                "is_passdown":   is_passdown,
+                "project_tag":   project_tag,
                 "goals":         json.dumps(a.goals),
                 "key_dates":        json.dumps(a.key_dates),
                 "information_items": json.dumps(a.information_items),
@@ -231,7 +247,7 @@ def _save_analysis(a: Analysis, reanalyze: bool = False) -> None:
 
 def _run_scan(sources: list[str]) -> None:
     scan_state.update({
-        "running": True, "cancelled": False,
+        "running": True, "cancelled": False, "mode": "scan",
         "progress": 0, "total": 0, "message": "Starting...",
     })
     started   = now_iso()
@@ -268,11 +284,7 @@ def _run_scan(sources: list[str]) -> None:
         actions = sum(1 for r in results if r.has_action)
         for r in results:
             _save_analysis(r)
-            threading.Thread(
-                target=_maybe_form_situation,
-                args=(r.item_id,),
-                daemon=True,
-            ).start()
+            _spawn_situation_task(r.item_id)
         status = "cancelled" if scan_state["cancelled"] else "success"
         with db_lock:
             scan_logs.insert({
@@ -321,7 +333,7 @@ def _run_reanalyze() -> None:
     Reuses ``scan_state`` for progress reporting.
     """
     scan_state.update({
-        "running": True, "cancelled": False,
+        "running": True, "cancelled": False, "mode": "reanalyze",
         "progress": 0, "total": 0, "message": "Loading stored items...",
     })
     started = now_iso()
@@ -374,11 +386,7 @@ def _run_reanalyze() -> None:
         actions = sum(1 for r in results if r.has_action)
         for r in results:
             _save_analysis(r, reanalyze=True)
-            threading.Thread(
-                target=_maybe_form_situation,
-                args=(r.item_id,),
-                daemon=True,
-            ).start()
+            _spawn_situation_task(r.item_id)
 
         status = "cancelled" if scan_state["cancelled"] else "success"
         with db_lock:
@@ -693,15 +701,23 @@ def save_settings(body: dict):
     with db_lock:
         existing = settings_tbl.get(doc_id=1) or {}
 
+    old_project_names = {p.get("name") for p in existing.get("projects", [])}
+
     for k, v in body.items():
         if v is not None and _MASK not in str(v):
             existing[k] = v
+
+    new_project_names = {p.get("name") for p in existing.get("projects", [])}
+    removed_projects  = old_project_names - new_project_names
 
     with db_lock:
         if settings_tbl.get(doc_id=1):
             settings_tbl.update(existing, doc_ids=[1])
         else:
             settings_tbl.insert(existing)
+        if removed_projects:
+            for name in removed_projects:
+                analyses.update({"project_tag": None}, Q.project_tag == name)
 
     config.apply_overrides(existing)
     return {"ok": True, "warnings": config.validate()}
@@ -742,15 +758,16 @@ def ingest(body: IngestRequest, background_tasks: BackgroundTasks):
         with db_lock:
             scan_state["ingest_pending"] += len(raw)
         for item in raw:
+            if scan_state["cancelled"]:
+                with db_lock:
+                    scan_state["ingest_pending"] = 0
+                print("[ingest] cancelled — stopping after current item")
+                return
             try:
                 with _ollama_sem:
                     result = analyze(item)
                 _save_analysis(result)
-                threading.Thread(
-                    target=_maybe_form_situation,
-                    args=(result.item_id,),
-                    daemon=True,
-                ).start()
+                _spawn_situation_task(result.item_id)
             except Exception as e:
                 print(f"[ingest] {item.item_id}: {e}")
             with db_lock:
@@ -787,6 +804,14 @@ def cancel_scan():
     if not scan_state["running"]:
         return {"ok": False, "detail": "No scan running"}
     scan_state["cancelled"] = True
+    return {"ok": True}
+
+
+@app.post("/analysis/stop")
+def stop_all_analysis():
+    """Gracefully halt all ongoing analysis: scan, reanalyze, ingest, situation formation, and seed."""
+    scan_state["cancelled"] = True
+    _seed_job["cancelled"]  = True
     return {"ok": True}
 
 
@@ -1034,6 +1059,9 @@ def _maybe_form_situation(item_id: str) -> None:
         if len(cluster_records) < 2:
             return
 
+        if scan_state["cancelled"]:
+            return
+
         # Create new situation
         with db_lock:
             cluster_intel = [
@@ -1078,6 +1106,21 @@ def _maybe_form_situation(item_id: str) -> None:
 
     except Exception as e:
         print(f"[correlator] _maybe_form_situation({item_id}): {e}")
+
+
+def _spawn_situation_task(item_id: str) -> None:
+    """Spawn a tracked _maybe_form_situation thread reflected in scan_state."""
+    with db_lock:
+        scan_state["situations_pending"] += 1
+
+    def _run() -> None:
+        try:
+            _maybe_form_situation(item_id)
+        finally:
+            with db_lock:
+                scan_state["situations_pending"] = max(0, scan_state["situations_pending"] - 1)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _update_situation_record(sit_id: str, item_ids: list) -> None:
@@ -1647,6 +1690,9 @@ def _run_seed_job(context: str) -> None:
         map_results  = []
         last_map_err = None
         for batch_num, batch_start in enumerate(range(0, n_items, batch_size), 1):
+            if _seed_job.get("cancelled") or scan_state["cancelled"]:
+                _seed_job.update({"state": "idle", "status": "idle", "progress": "Cancelled."})
+                return
             _seed_job["progress"] = f"Map pass: batch {batch_num}/{n_batches}…"
             batch = all_items[batch_start:batch_start + batch_size]
             lines = []
@@ -1943,11 +1989,16 @@ def seed_apply(body: dict, background_tasks: BackgroundTasks):
             with db_lock:
                 all_items = analyses.all()
             item_ids = [item.get("item_id") for item in all_items if item.get("item_id")]
+            with db_lock:
+                scan_state["situations_pending"] += len(item_ids)
             for iid in item_ids:
                 try:
                     _maybe_form_situation(iid)
                 except Exception as e:
                     print(f"[seed] situation sweep {iid}: {e}")
+                finally:
+                    with db_lock:
+                        scan_state["situations_pending"] = max(0, scan_state["situations_pending"] - 1)
             print(f"[seed] situation sweep complete ({len(item_ids)} items)")
         except Exception as e:
             print(f"[seed] situation sweep failed: {e}")

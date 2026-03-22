@@ -27,13 +27,13 @@
 html, body { height: 100%; overflow: hidden; }
 body { background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 13px; }
 
-.shell { display: grid; grid-template-rows: 52px 2px 1fr 26px; height: 100vh; }
+.shell { display: grid; grid-template-rows: 96px 2px 1fr 26px; height: 100vh; }
 
 /* ── Topbar ── */
 .topbar {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 0 20px; border-bottom: 1px solid var(--border2); background: var(--surface);
-  border-top: 3px solid var(--gold);
+  padding: 12px 20px; border-bottom: 1px solid var(--border2); background: var(--surface);
+  border-top: 4px solid var(--gold);
 }
 .wordmark {
   font-family: var(--display); font-weight: 800;
@@ -41,8 +41,8 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
   display: flex; align-items: center; gap: 11px;
 }
 .brand-icon {
-  width: 38px; height: 38px;
-  filter: drop-shadow(0 0 10px rgba(212,160,23,0.55));
+  width: 72px; height: 72px;
+  filter: drop-shadow(0 0 12px rgba(212,160,23,0.6));
   flex-shrink: 0;
 }
 .wordmark-text { display: flex; flex-direction: column; gap: 1px; }
@@ -587,7 +587,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 /* ── Responsive ── */
 @media (max-width: 768px) {
   html, body { overflow: auto; }
-  .shell { grid-template-rows: 52px 2px 1fr 26px; height: auto; min-height: 100vh; }
+  .shell { grid-template-rows: 96px 2px 1fr 26px; height: auto; min-height: 100vh; }
   .body  { grid-template-columns: 1fr; overflow: visible; }
 
   /* Sidebar slides in as overlay */
@@ -771,6 +771,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
   <div class="statusbar">
     <div class="spinner" id="spin"></div>
     <span id="statusMsg">Ready</span>
+    <button id="stopAllBtn" class="scan-btn" style="display:none;margin-left:auto;padding:2px 8px;font-size:10px" onclick="stopAllAnalysis()">■ Stop</button>
   </div>
 
 </div>
@@ -925,6 +926,7 @@ let _searchTimer    = null;
 
 async function loadProjectList() {
   try { allProjects = await api('/projects'); } catch(e) { allProjects = []; }
+  renderSidebarProjects(allAnalyses);
 }
 
 function showProjectPicker(itemId, anchorEl) {
@@ -1051,20 +1053,42 @@ async function stopScan() {
   catch (e) { $('statusMsg').textContent = `Stop failed: ${e.message}`; }
 }
 
+async function stopAllAnalysis() {
+  try {
+    await api('/analysis/stop', 'POST');
+    $('statusMsg').textContent = 'Stopping after current item…';
+    $('stopAllBtn').style.display = 'none';
+  } catch (e) { $('statusMsg').textContent = `Stop failed: ${e.message}`; }
+}
+
 async function pollScan() {
   try {
-    const s   = await api('/scan/status');
-    const pct = s.total > 0 ? (s.progress / s.total * 100) : (s.running ? 25 : 100);
-    $('pbar').style.width      = pct + '%';
-    $('statusMsg').textContent = s.message;
-    if (!s.running) {
+    const s            = await api('/scan/status');
+    const sitsPending  = s.situations_pending || 0;
+    const pct          = s.total > 0 ? (s.progress / s.total * 100) : (s.running ? 25 : 100);
+    $('pbar').style.width = pct + '%';
+
+    if (s.running) {
+      $('statusMsg').textContent = s.message;
+    } else if (sitsPending > 0) {
+      // Main analysis done; situation synthesis still running on GPU
+      setStatus('scanning');
+      $('statusMsg').textContent = `Forming situations… (${sitsPending} remaining)`;
+      $('scanBtn').textContent      = '▶ Scan';
+      $('scanBtn').onclick          = startScan;
+      $('reanalyzeBtn').textContent = '↺ Re-analyze';
+      $('reanalyzeBtn').onclick     = startReanalyze;
+    } else {
+      // Fully done
       clearInterval(scanTimer);
+      scanTimer = null;
       $('scanBtn').textContent      = '▶ Scan';
       $('scanBtn').onclick          = startScan;
       $('reanalyzeBtn').textContent = '↺ Re-analyze';
       $('reanalyzeBtn').onclick     = startReanalyze;
       $('spin').classList.remove('on');
       setStatus('ready');
+      $('statusMsg').textContent = s.message;
       setTimeout(() => { $('pbar').style.width = '0'; }, 2000);
       await Promise.all([loadStats(), loadTodos(), loadIntel(), loadItems(), loadSituations()]);
       updateTypeCounts(allAnalyses);
@@ -1999,9 +2023,17 @@ async function connectTeams() {
 
 let _seedPollTimer = null;
 
-function openSeed() {
+async function openSeed() {
   $('seedModal').classList.add('open');
-  renderSeedState({ state: 'start' });
+  try {
+    const st = await api('/seed/status', 'GET');
+    renderSeedState(st);
+    if (st.state && !['idle', 'done', 'error', 'start', 'review'].includes(st.state)) {
+      startSeedPolling();
+    }
+  } catch(e) {
+    renderSeedState({ state: 'start' });
+  }
 }
 
 function closeSeed() {
@@ -2015,7 +2047,7 @@ function startSeedPolling() {
     try {
       const st = await api('/seed/status', 'GET');
       renderSeedState(st);
-      if (['done','error'].includes(st.state)) stopSeedPolling();
+      if (['done','error','review'].includes(st.state)) stopSeedPolling();
     } catch(e) { /* ignore transient */ }
   }, 2500);
 }
@@ -2430,16 +2462,37 @@ async function saveSettings() {
 async function pollStatus() {
   if (scanTimer) return; // scan already polling at 1s
   try {
-    const s       = await api('/scan/status');
-    const pending = s.ingest_pending || 0;
-    if (pending > 0) {
+    const s        = await api('/scan/status');
+    const pending  = s.ingest_pending     || 0;
+    const sitsPend = s.situations_pending || 0;
+    if (s.running) {
+      // Scan or reanalyze in progress — resume polling (handles page refresh mid-analysis)
+      if (s.mode === 'reanalyze') {
+        $('reanalyzeBtn').textContent = '■ Stop';
+        $('reanalyzeBtn').onclick     = stopScan;
+      } else {
+        $('scanBtn').textContent = '■ Stop';
+        $('scanBtn').onclick     = stopScan;
+      }
+      $('spin').classList.add('on');
+      setStatus('scanning');
+      scanTimer = setInterval(pollScan, 1000);
+    } else if (pending > 0) {
       $('spin').classList.add('on');
       $('statusMsg').textContent = `Analyzing ${pending} item${pending !== 1 ? 's' : ''}…`;
       setStatus('scanning');
+      $('stopAllBtn').style.display = '';
+      ingestWasActive = true;
+    } else if (sitsPend > 0) {
+      $('spin').classList.add('on');
+      $('statusMsg').textContent = `Forming situations… (${sitsPend} remaining)`;
+      setStatus('scanning');
+      $('stopAllBtn').style.display = '';
       ingestWasActive = true;
     } else if (ingestWasActive) {
       ingestWasActive = false;
       $('spin').classList.remove('on');
+      $('stopAllBtn').style.display = 'none';
       setStatus('ready');
       $('statusMsg').textContent = 'Ready';
       await Promise.all([loadStats(), loadTodos(), loadIntel(), loadItems(), loadSituations()]);
@@ -2447,6 +2500,7 @@ async function pollStatus() {
   } catch (e) { /* ignore */ }
 }
 setInterval(pollStatus, 3000);
+pollStatus(); // check immediately on page load so refresh restores correct state
 
 function clearSearch() { $('searchInput').value = ''; searchQuery = ''; }
 clearSearch();

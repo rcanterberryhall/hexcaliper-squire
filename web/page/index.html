@@ -389,17 +389,19 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .project-picker button:hover { background: var(--border); color: var(--accent); }
 .project-picker .no-projects { font-size: 10px; color: var(--muted); padding: 5px 9px; }
 .project-row {
-  display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 6px; align-items: start;
+  display: grid; grid-template-columns: 1fr 1.5fr 1fr 1fr auto; gap: 6px; align-items: start;
   margin-bottom: 8px;
 }
-.project-row input {
+.project-row input, .project-row textarea, .project-row select {
   width: 100%; background: var(--bg); border: 1px solid var(--border2);
   color: var(--text); font-family: var(--mono); font-size: 11px;
   padding: 5px 8px; border-radius: var(--r); outline: none; transition: border-color .15s;
 }
-.project-row input:focus { border-color: var(--accent); }
+.project-row textarea { resize: vertical; min-height: 52px; }
+.project-row input:focus, .project-row textarea:focus, .project-row select:focus { border-color: var(--accent); }
+.project-row select { appearance: none; cursor: pointer; }
 .project-row-head {
-  display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 6px;
+  display: grid; grid-template-columns: 1fr 1.5fr 1fr 1fr auto; gap: 6px;
   margin-bottom: 4px;
 }
 .project-row-head span { font-size: 9px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); padding: 0 2px; }
@@ -822,11 +824,11 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
       <div class="field">
         <label>Projects</label>
         <div class="project-row-head" id="project-list-head" style="display:none">
-          <span>Name</span><span>Keywords (comma-sep)</span><span>Slack Channels (comma-sep)</span><span></span>
+          <span>Name / Parent</span><span>Description</span><span>Keywords</span><span>Senders</span><span></span>
         </div>
         <div id="project-list"></div>
         <button class="connect-btn" style="margin-top:6px" onclick="addProjectRow()">+ Add Project</button>
-        <div class="field-hint">Keywords are matched in Slack/email content. Channels are Slack channel names to prioritize.</div>
+        <div class="field-hint">Keywords and senders are matched in email/Slack content. Parent links a sub-project to a broader project.</div>
       </div>
       <div class="field" style="display:flex;align-items:center;justify-content:space-between">
         <div>
@@ -1326,8 +1328,8 @@ function itemRow(i) {
   const replied = i.is_replied ? `<span title="Replied" style="color:var(--blue);font-size:10px;margin-left:4px">↩</span>` : '';
   return `<tr onclick="openItemDetail('${esc(i.item_id)}')">
     <td><span class="badge b-${i.source}">${i.source}</span>${pd}${replied}</td>
-    <td><span class="badge b-${i.category || 'fyi'}">${cat}</span>${proj}</td>
-    <td class="t-title">${esc(i.title || '')}</td>
+    <td><span class="badge b-${i.category || 'fyi'}">${cat}</span></td>
+    <td class="t-title">${esc(i.title || '')}${proj}</td>
     <td class="t-author">${esc(i.author || '')}</td>
     <td class="t-sum">${esc(i.summary || '')}</td>
     <td class="pri-${i.priority || 'low'}">${i.priority || 'low'}</td>
@@ -2289,9 +2291,16 @@ function addProjectRow(p = {}) {
   const embSubs  = (p.embedding_subs  || []).join(', ') || 'none';
   const metaLabel = total === 0 ? '0 learned'
     : [lcount > 0 ? `${lcount} kw` : '', scount > 0 ? `${scount} senders` : ''].filter(Boolean).join(' · ');
+
+  // Build parent dropdown options — populated on open via _refreshParentDropdowns()
+  const parentVal = esc(p.parent || '');
+
   row.innerHTML = `
     <div>
-      <input type="text" placeholder="Project Alpha" value="${esc(p.name || '')}">
+      <input type="text" class="proj-name" placeholder="Project Alpha" value="${esc(p.name || '')}" oninput="_refreshParentDropdowns()">
+      <select class="proj-parent" style="margin-top:4px" title="Parent project (optional)">
+        <option value="">— no parent —</option>
+      </select>
       <div style="font-size:9px;color:var(--muted);margin-top:3px;display:flex;align-items:center;gap:6px">
         <span class="learned-count">${metaLabel}</span>
         ${embCount > 0 ? `<span class="learned-count">${embCount} embedded (${esc(embSubs)})</span>` : ''}
@@ -2299,16 +2308,36 @@ function addProjectRow(p = {}) {
         ${total > 0 ? `<button class="ia" style="font-size:9px;padding:1px 4px" onclick="clearLearned(this)" title="Clear all learned data">clear</button>` : ''}
       </div>
     </div>
-    <input type="text" placeholder="alpha, PA-" value="${esc((p.keywords || []).join(', '))}">
-    <input type="text" placeholder="proj-alpha, alpha-eng" value="${esc((p.channels || []).join(', '))}">
+    <textarea class="proj-desc" placeholder="Short description of scope, location, or purpose…">${esc(p.description || '')}</textarea>
+    <input type="text" class="proj-kw" placeholder="alpha, PA-" value="${esc((p.keywords || []).join(', '))}">
+    <input type="text" class="proj-senders" placeholder="jane@co.com, John Smith" value="${esc((p.senders || []).join(', '))}">
     <button class="ia del" onclick="removeProjectRow(this)" title="Remove">✕</button>
     <div class="learned-panel" style="display:none"></div>`;
+
+  // Store parent value for after dropdown is populated
+  row.dataset.parentVal = parentVal;
   list.appendChild(row);
+  _refreshParentDropdowns();
+}
+
+function _refreshParentDropdowns() {
+  const rows  = Array.from($('project-list').querySelectorAll('.project-row'));
+  const names = rows.map(r => (r.querySelector('.proj-name') || {}).value || '').filter(Boolean);
+  rows.forEach(row => {
+    const sel      = row.querySelector('.proj-parent');
+    const current  = sel.value || row.dataset.parentVal || '';
+    sel.innerHTML  = '<option value="">— no parent —</option>'
+      + names.filter(n => n !== ((row.querySelector('.proj-name') || {}).value || ''))
+             .map(n => `<option value="${esc(n)}" ${n === current ? 'selected' : ''}>${esc(n)}</option>`)
+             .join('');
+    row.dataset.parentVal = '';  // consumed
+  });
 }
 
 function removeProjectRow(btn) {
   btn.closest('.project-row').remove();
   if (!$('project-list').children.length) $('project-list-head').style.display = 'none';
+  _refreshParentDropdowns();
 }
 
 function toggleLearnedPanel(btn) {
@@ -2390,11 +2419,13 @@ function clearLearned(btn) {
 
 function readProjects() {
   return Array.from($('project-list').querySelectorAll('.project-row')).map(row => {
-    const inputs = row.querySelectorAll('input');
     return {
-      name:             inputs[0].value.trim(),
-      keywords:         inputs[1].value.split(',').map(s => s.trim()).filter(Boolean),
-      channels:         inputs[2].value.split(',').map(s => s.trim()).filter(Boolean),
+      name:             (row.querySelector('.proj-name')    || {}).value?.trim() || '',
+      parent:           (row.querySelector('.proj-parent')  || {}).value?.trim() || '',
+      description:      (row.querySelector('.proj-desc')    || {}).value?.trim() || '',
+      keywords:         ((row.querySelector('.proj-kw')     || {}).value || '').split(',').map(s => s.trim()).filter(Boolean),
+      senders:          ((row.querySelector('.proj-senders')|| {}).value || '').split(',').map(s => s.trim()).filter(Boolean),
+      channels:         [],
       learned_keywords: JSON.parse(row.dataset.learned        || '[]'),
       learned_senders:  JSON.parse(row.dataset.learnedSenders || '[]'),
     };

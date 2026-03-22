@@ -28,6 +28,7 @@ Key helpers:
         learning endpoints in ``app.py``.
 """
 import json
+import re
 import requests
 from models import RawItem, Analysis, ActionItem
 import config
@@ -62,7 +63,7 @@ Respond ONLY with valid JSON. No explanation, no markdown fences.
   "category": one of ["reply_needed", "task", "deadline", "review", "approval", "fyi", "noise"],
   "hierarchy": one of ["user", "project", "topic", "general"],
   "is_passdown": true or false,
-  "project_tag": "matching project name or null",
+  "project_tag": "exact project name from the active projects list above, or null if none match — do NOT invent names from email content; prefer the most specific sub-project over its parent when both could match",
   "action_items": [
     {{
       "description": "specific concrete action",
@@ -146,20 +147,29 @@ def _projects_ctx() -> str:
     """Build a readable summary of configured projects for the prompt."""
     if not config.PROJECTS:
         return "none configured"
+    # Index project names for parent lookup
+    project_names = {p.get("name") for p in config.PROJECTS}
     parts = []
     for p in config.PROJECTS:
-        name = p.get("name", "unnamed")
-        kw   = list(p.get("keywords", [])) + list(p.get("learned_keywords", []))
-        ch   = ", ".join(p.get("channels", []))
-        sr   = p.get("learned_senders", [])
-        desc = name
+        name   = p.get("name", "unnamed")
+        parent = p.get("parent", "")
+        desc_text = p.get("description", "")
+        kw     = list(p.get("keywords", [])) + list(p.get("learned_keywords", []))
+        ch     = ", ".join(p.get("channels", []))
+        sr     = list(p.get("senders", [])) + list(p.get("learned_senders", []))
+
+        line = name
+        if parent and parent in project_names:
+            line += f" [sub-project of {parent}]"
+        if desc_text:
+            line += f" — {desc_text}"
         if kw:
-            desc += f" (keywords: {', '.join(kw[:20])})"
+            line += f" (keywords: {', '.join(kw[:20])})"
         if ch:
-            desc += f" (channels: {ch})"
+            line += f" (channels: {ch})"
         if sr:
-            desc += f" (known senders/groups: {', '.join(sr[:10])})"
-        parts.append(desc)
+            line += f" (known senders: {', '.join(sr[:15])})"
+        parts.append(line)
     return "; ".join(parts)
 
 
@@ -286,7 +296,8 @@ def _match_sender(item: RawItem) -> str | None:
         return None
 
     for p in config.PROJECTS:
-        for sender in p.get("learned_senders", []):
+        all_senders = list(p.get("senders", [])) + list(p.get("learned_senders", []))
+        for sender in all_senders:
             if sender.lower() in candidates:
                 return p["name"]
     return None
@@ -305,6 +316,27 @@ def _detect_passdown(title: str, body: str) -> bool:
         _PASSDOWN_PATTERNS.search(title)
         or _PASSDOWN_PATTERNS.search(body[:300])
     )
+
+
+_CAUTION_PATTERN = re.compile(
+    r'CAUTION:\s*This email originated from outside[^\n]*\n'
+    r'(?:Do not click[^\n]*\n)?'
+    r'(?:\n)*',
+    re.IGNORECASE,
+)
+
+
+def _strip_caution(body: str) -> str:
+    """Remove the external-sender CAUTION warning from email bodies."""
+    return _CAUTION_PATTERN.sub('', body).lstrip()
+
+
+def _validated_project_tag(tag: str | None) -> str | None:
+    """Return tag only if it exactly matches a configured project name, else None."""
+    if not tag or not config.PROJECTS:
+        return tag
+    valid = {p.get("name") for p in config.PROJECTS}
+    return tag if tag in valid else None
 
 
 def analyze(item: RawItem) -> Analysis:
@@ -480,10 +512,12 @@ def analyze(item: RawItem) -> Analysis:
         urgency_reason    = data.get("urgency_reason"),
         hierarchy         = data.get("hierarchy", item.metadata.get("hierarchy", "general")),
         is_passdown       = _detect_passdown(item.title, item.body) or bool(data.get("is_passdown", False)),
-        project_tag       = data.get("project_tag") or item.metadata.get("project_tag"),
+        project_tag       = _validated_project_tag(
+                               data.get("project_tag") or item.metadata.get("project_tag")
+                           ),
         goals             = [g for g in data.get("goals", []) if isinstance(g, str) and g],
         key_dates         = [d for d in data.get("key_dates", []) if isinstance(d, dict)],
-        body_preview      = item.body[:2000],
+        body_preview      = _strip_caution(item.body)[:2000],
         to_field          = to_field,
         cc_field          = cc_field,
         is_replied        = is_replied,

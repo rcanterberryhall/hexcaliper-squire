@@ -636,6 +636,8 @@ def patch_analysis(item_id: str, body: dict, background_tasks: BackgroundTasks):
             todos.remove(Q.item_id == item_id)
         elif "priority" in updates:
             todos.update({"priority": updates["priority"]}, Q.item_id == item_id)
+        if "project_tag" in updates:
+            intel_tbl.update({"project_tag": updates["project_tag"]}, Q.item_id == item_id)
 
     old_project  = old_record.get("project_tag")
     old_category = old_record.get("category")
@@ -716,9 +718,10 @@ def tag_item(item_id: str, body: TagRequest, background_tasks: BackgroundTasks):
     if not any(p.get("name") == project_name for p in config.PROJECTS):
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Update the stored analysis immediately
+    # Update the stored analysis and any associated intel rows immediately
     with db_lock:
         analyses.update({"project_tag": project_name}, Q.item_id == item_id)
+        intel_tbl.update({"project_tag": project_name}, Q.item_id == item_id)
 
     def learn() -> None:
         """Extract keywords and senders from the tagged item and update project config."""
@@ -937,6 +940,7 @@ def save_settings(body: dict):
         if removed_projects:
             for name in removed_projects:
                 analyses.update({"project_tag": None}, Q.project_tag == name)
+                intel_tbl.update({"project_tag": None}, Q.project_tag == name)
 
     config.apply_overrides(existing)
     return {"ok": True, "warnings": config.validate()}

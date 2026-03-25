@@ -1,4 +1,4 @@
-"""tests/test_orchestrator.py — Unit tests for _run_scan and _run_reanalyze.
+"""tests/test_orchestrator.py — Unit tests for orchestrator.run_scan and run_reanalyze.
 
 Validates that items flow through the pipeline and land in the database
 correctly. The existing scan tests in test_app.py only check HTTP status
@@ -6,9 +6,8 @@ codes and conflict detection; these tests assert on what gets persisted.
 """
 from unittest.mock import patch, MagicMock
 
+import orchestrator
 from app import (
-    _run_scan,
-    _run_reanalyze,
     analyses,
     todos,
     scan_logs,
@@ -16,6 +15,9 @@ from app import (
     Q,
 )
 from models import RawItem, Analysis, ActionItem
+
+_run_scan     = orchestrator.run_scan
+_run_reanalyze = orchestrator.run_reanalyze
 
 
 def _raw(source="outlook", item_id="x1", title="Test item"):
@@ -48,15 +50,15 @@ def _all_connectors_patched(outlook_items=None, github_items=None,
     methods.  Unspecified connectors return []."""
     from contextlib import ExitStack
     stack = ExitStack()
-    stack.enter_context(patch("app.connector_outlook.fetch",
+    stack.enter_context(patch("orchestrator.connector_outlook.fetch",
                               return_value=outlook_items or []))
-    stack.enter_context(patch("app.connector_github.fetch",
+    stack.enter_context(patch("orchestrator.connector_github.fetch",
                               return_value=github_items or []))
-    stack.enter_context(patch("app.connector_slack.fetch",
+    stack.enter_context(patch("orchestrator.connector_slack.fetch",
                               return_value=slack_items or []))
-    stack.enter_context(patch("app.connector_jira.fetch",
+    stack.enter_context(patch("orchestrator.connector_jira.fetch",
                               return_value=jira_items or []))
-    stack.enter_context(patch("app.connector_teams.fetch",
+    stack.enter_context(patch("orchestrator.connector_teams.fetch",
                               return_value=teams_items or []))
     return stack
 
@@ -65,7 +67,7 @@ def _all_connectors_patched(outlook_items=None, github_items=None,
 
 def test_run_scan_saves_analysis_to_db():
     with _all_connectors_patched(outlook_items=[_raw()]), \
-         patch("app.analyze", return_value=_analysis()), \
+         patch("orchestrator.analyze", return_value=_analysis()), \
          patch("situation_manager._spawn_situation_task"):
         _run_scan(["outlook"])
 
@@ -83,7 +85,7 @@ def test_run_scan_creates_todo_for_action_item():
     )
 
     with _all_connectors_patched(outlook_items=[_raw()]), \
-         patch("app.analyze", return_value=result), \
+         patch("orchestrator.analyze", return_value=result), \
          patch("situation_manager._spawn_situation_task"):
         _run_scan(["outlook"])
 
@@ -94,7 +96,7 @@ def test_run_scan_creates_todo_for_action_item():
 
 def test_run_scan_writes_log_on_success():
     with _all_connectors_patched(github_items=[_raw(source="github")]), \
-         patch("app.analyze", return_value=_analysis(source="github")), \
+         patch("orchestrator.analyze", return_value=_analysis(source="github")), \
          patch("situation_manager._spawn_situation_task"):
         _run_scan(["github"])
 
@@ -118,7 +120,7 @@ def test_run_scan_handles_analyze_exception_gracefully():
         return _analysis(item.item_id)
 
     with _all_connectors_patched(outlook_items=items), \
-         patch("app.analyze", side_effect=flaky_analyze), \
+         patch("orchestrator.analyze", side_effect=flaky_analyze), \
          patch("situation_manager._spawn_situation_task"):
         _run_scan(["outlook"])
 
@@ -137,7 +139,7 @@ def test_run_scan_respects_cancellation():
 
     try:
         with _all_connectors_patched(outlook_items=items), \
-             patch("app.analyze", side_effect=cancelling_analyze), \
+             patch("orchestrator.analyze", side_effect=cancelling_analyze), \
              patch("situation_manager._spawn_situation_task"):
             _run_scan(["outlook"])
 
@@ -153,7 +155,7 @@ def test_run_scan_respects_cancellation():
 
 def test_run_scan_sets_running_false_after_completion():
     with _all_connectors_patched(), \
-         patch("app.analyze", return_value=_analysis()), \
+         patch("orchestrator.analyze", return_value=_analysis()), \
          patch("situation_manager._spawn_situation_task"):
         _run_scan(["slack"])
 
@@ -195,7 +197,7 @@ def test_run_reanalyze_reprocesses_stored_items():
     def high_priority_analyze(item):
         return _analysis(item.item_id, priority="high")
 
-    with patch("app.analyze", side_effect=high_priority_analyze), \
+    with patch("orchestrator.analyze", side_effect=high_priority_analyze), \
          patch("situation_manager._spawn_situation_task"):
         _run_reanalyze()
 
@@ -208,7 +210,7 @@ def test_run_reanalyze_preserves_user_edited_fields():
     reanalysis even when the LLM returns a different priority."""
     _insert_minimal("u1", priority="high")
 
-    with patch("app.analyze", return_value=_analysis("u1", priority="low")), \
+    with patch("orchestrator.analyze", return_value=_analysis("u1", priority="low")), \
          patch("situation_manager._spawn_situation_task"):
         _run_reanalyze()
 
@@ -262,7 +264,7 @@ def test_run_reanalyze_deletes_stale_todos_before_reinserting():
         action_items=[new_action], summary="S", urgency_reason=None,
     )
 
-    with patch("app.analyze", return_value=new_result), \
+    with patch("orchestrator.analyze", return_value=new_result), \
          patch("situation_manager._spawn_situation_task"):
         _run_reanalyze()
 
@@ -284,7 +286,7 @@ def test_run_reanalyze_sorts_passdowns_first():
         call_order.append(item.item_id)
         return _analysis(item.item_id)
 
-    with patch("app.analyze", side_effect=recording_analyze), \
+    with patch("orchestrator.analyze", side_effect=recording_analyze), \
          patch("situation_manager._spawn_situation_task"):
         _run_reanalyze()
 

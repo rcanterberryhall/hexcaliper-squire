@@ -61,15 +61,12 @@ from pydantic import BaseModel
 from tinydb import TinyDB, Query
 
 import config
-from agent import analyze, extract_keywords, extract_emails
+from agent import extract_keywords, extract_emails
 from models import RawItem, Analysis
-import connector_slack
-import connector_github
-import connector_jira
-import connector_outlook
-import connector_teams
 import correlator as _correlator
 import situation_manager
+import orchestrator
+import seeder
 
 app = FastAPI(title="Hexcaliper Squire API", version="1.0.0")
 
@@ -93,25 +90,11 @@ situations_tbl = db.table("situations")
 intel_tbl      = db.table("intel")
 Q            = Query()
 db_lock      = threading.Lock()
-# Limits concurrent Ollama calls — set to 1 for single GPU, raise for multi-GPU
-_ollama_sem  = threading.Semaphore(1)
-
-# Single-slot job state for the seed background job (one user, one job at a time)
-_seed_job: dict = {"status": "idle"}
 
 # Hot-load any previously saved settings on startup
 _saved_settings = settings_tbl.get(doc_id=1)
 if _saved_settings:
     config.apply_overrides(_saved_settings)
-
-
-CONNECTORS = {
-    "slack":   connector_slack,
-    "github":  connector_github,
-    "jira":    connector_jira,
-    "outlook": connector_outlook,
-    "teams":   connector_teams,
-}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -290,185 +273,15 @@ def _save_analysis(a: Analysis, reanalyze: bool = False) -> None:
                 })
 
 
-def _run_scan(sources: list[str]) -> None:
-    """
-    Fetch items from one or more connectors and run LLM analysis on each.
+orchestrator.init(analyses, todos, scan_logs, intel_tbl, db_lock, scan_state,
+                  save_analysis_fn=_save_analysis,
+                  spawn_situation_fn=situation_manager._spawn_situation_task)
 
-    Iterates ``sources`` in order, calling the matching connector's ``fetch()``
-    method.  Each item is then passed to ``agent.analyze`` under ``_ollama_sem``
-    so only one Ollama call runs at a time.  Saves every result via
-    ``_save_analysis`` and spawns a situation-formation task per item.  A scan
-    log entry is written regardless of success or cancellation.
-
-    Progress is reflected in the module-level ``scan_state`` dict, which the
-    frontend polls via ``GET /scan/status``.
-
-    :param sources: List of connector names to fetch from, e.g.
-                    ``["slack", "github", "jira"]``.
-    :type sources: list[str]
-    """
-    scan_state.update({
-        "running": True, "cancelled": False, "mode": "scan",
-        "progress": 0, "total": 0, "message": "Starting...",
-    })
-    started   = now_iso()
-    all_items: list[RawItem] = []
-
-    for src in sources:
-        if scan_state["cancelled"]:
-            break
-        scan_state.update({"message": f"Fetching {src}...", "current_source": src})
-        connector = CONNECTORS.get(src)
-        if connector:
-            all_items.extend(connector.fetch())
-
-    scan_state["total"]   = len(all_items)
-    scan_state["message"] = f"Analyzing {len(all_items)} items..."
-
-    results = []
-    try:
-        for i, item in enumerate(all_items):
-            if scan_state["cancelled"]:
-                break
-            scan_state.update({
-                "progress":       i,
-                "current_source": item.source,
-                "current_item":   item.title[:60],
-                "message":        f"[{item.source}] {i + 1}/{len(all_items)}: {item.title[:60]}",
-            })
-            try:
-                with _ollama_sem:
-                    results.append(analyze(item))
-            except Exception as e:
-                print(f"[agent] {item.item_id}: {e}")
-
-        actions = sum(1 for r in results if r.has_action)
-        for r in results:
-            _save_analysis(r)
-            situation_manager._spawn_situation_task(r.item_id)
-        status = "cancelled" if scan_state["cancelled"] else "success"
-        with db_lock:
-            scan_logs.insert({
-                "started_at":    started,
-                "finished_at":   now_iso(),
-                "sources":       ",".join(sources),
-                "items_scanned": len(results),
-                "actions_found": actions,
-                "status":        status,
-            })
-        if scan_state["cancelled"]:
-            scan_state["message"] = (
-                f"Stopped — {actions} action items found in "
-                f"{len(results)}/{len(all_items)} items processed."
-            )
-        else:
-            scan_state["message"] = (
-                f"Done — {actions} action items found across "
-                f"{len(all_items)} items from {', '.join(sources)}."
-            )
-    except Exception as e:
-        with db_lock:
-            scan_logs.insert({
-                "started_at":    started,
-                "finished_at":   now_iso(),
-                "sources":       ",".join(sources),
-                "items_scanned": len(results),
-                "actions_found": 0,
-                "status":        f"error: {e}",
-            })
-        scan_state["message"] = f"Error: {e}"
-    finally:
-        scan_state["running"]  = False
-        scan_state["progress"] = scan_state["total"]
-
-
-def _run_reanalyze() -> None:
-    """
-    Re-run LLM analysis on all stored items using the current config.
-
-    Reconstructs a ``RawItem`` from each stored analysis record (using
-    ``body_preview``, ``to_field``, ``cc_field``, and existing ``project_tag``
-    as a manual-tag hint), passes it through ``analyze()``, then calls
-    ``_save_analysis(reanalyze=True)`` to replace stale todos and intel.
-    Situation formation is re-triggered for each item after save.
-    Reuses ``scan_state`` for progress reporting.
-    """
-    scan_state.update({
-        "running": True, "cancelled": False, "mode": "reanalyze",
-        "progress": 0, "total": 0, "message": "Loading stored items...",
-    })
-    started = now_iso()
-    try:
-        with db_lock:
-            all_records = analyses.all()
-
-        # Process passdowns first — they are the richest source of operational
-        # current state and their intel should be available when situations
-        # form for subsequent items.
-        all_records.sort(key=lambda r: (0 if r.get("is_passdown") else 1, r.get("timestamp", "")))
-
-        scan_state["total"]   = len(all_records)
-        scan_state["message"] = f"Re-analyzing {len(all_records)} items..."
-
-        results = []
-        for i, rec in enumerate(all_records):
-            if scan_state["cancelled"]:
-                break
-            scan_state.update({
-                "progress":       i,
-                "current_source": rec.get("source", ""),
-                "current_item":   (rec.get("title") or "")[:60],
-                "message":        f"[{rec.get('source','')}] {i + 1}/{len(all_records)}: {(rec.get('title') or '')[:60]}",
-            })
-            item = RawItem(
-                source    = rec.get("source", ""),
-                item_id   = rec.get("item_id", ""),
-                title     = rec.get("title", ""),
-                body      = rec.get("body_preview", "") or rec.get("title", ""),
-                url       = rec.get("url", ""),
-                author    = rec.get("author", ""),
-                timestamp = rec.get("timestamp", now_iso()),
-                metadata  = {
-                    "to":          rec.get("to_field", ""),
-                    "cc":          rec.get("cc_field", ""),
-                    "is_replied":  rec.get("is_replied", False),
-                    "replied_at":  rec.get("replied_at"),
-                    "project_tag": rec.get("project_tag"),
-                    "hierarchy":   rec.get("hierarchy"),
-                },
-            )
-            try:
-                with _ollama_sem:
-                    result = analyze(item)
-                results.append(result)
-            except Exception as e:
-                print(f"[reanalyze] {item.item_id}: {e}")
-
-        actions = sum(1 for r in results if r.has_action)
-        for r in results:
-            _save_analysis(r, reanalyze=True)
-            situation_manager._spawn_situation_task(r.item_id)
-
-        status = "cancelled" if scan_state["cancelled"] else "success"
-        with db_lock:
-            scan_logs.insert({
-                "started_at":    started,
-                "finished_at":   now_iso(),
-                "sources":       "reanalyze",
-                "items_scanned": len(results),
-                "actions_found": actions,
-                "status":        status,
-            })
-        scan_state["message"] = (
-            f"Re-analysis complete — {len(results)} items processed, "
-            f"{actions} action items found."
-        )
-    except Exception as e:
-        scan_state["message"] = f"Re-analysis error: {e}"
-        print(f"[reanalyze] {e}")
-    finally:
-        scan_state["running"]  = False
-        scan_state["progress"] = scan_state["total"]
+seeder.init(analyses, todos, settings_tbl, intel_tbl, situations_tbl,
+            embeddings_tbl, db_lock, scan_state,
+            run_scan_fn=orchestrator.run_scan,
+            run_reanalyze_fn=orchestrator.run_reanalyze,
+            maybe_form_situation_fn=situation_manager._maybe_form_situation)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -1029,28 +842,8 @@ def ingest(body: IngestRequest, background_tasks: BackgroundTasks):
             metadata  = i.get("metadata", {}),
         ))
 
-    def process() -> None:
-        """Analyse each new item, save results, and spawn situation tasks."""
-        with db_lock:
-            scan_state["ingest_pending"] += len(raw)
-        for item in raw:
-            if scan_state["cancelled"]:
-                with db_lock:
-                    scan_state["ingest_pending"] = 0
-                print("[ingest] cancelled — stopping after current item")
-                return
-            try:
-                with _ollama_sem:
-                    result = analyze(item)
-                _save_analysis(result)
-                situation_manager._spawn_situation_task(result.item_id)
-            except Exception as e:
-                print(f"[ingest] {item.item_id}: {e}")
-            with db_lock:
-                scan_state["ingest_pending"] = max(0, scan_state["ingest_pending"] - 1)
-
     if raw:
-        background_tasks.add_task(process)
+        background_tasks.add_task(orchestrator.process_ingest_items, raw)
 
     return {"received": len(raw), "skipped": len(body.items) - len(raw)}
 
@@ -1083,7 +876,7 @@ def start_scan(body: ScanRequest):
     """
     if scan_state["running"]:
         raise HTTPException(status_code=409, detail="Scan already in progress.")
-    threading.Thread(target=_run_scan, args=(body.sources,), daemon=True).start()
+    threading.Thread(target=orchestrator.run_scan, args=(body.sources,), daemon=True).start()
     return {"status": "started", "sources": body.sources}
 
 
@@ -1134,7 +927,7 @@ def stop_all_analysis():
     :rtype: dict
     """
     scan_state["cancelled"] = True
-    _seed_job["cancelled"]  = True
+    seeder.cancel()
     return {"ok": True}
 
 
@@ -1158,7 +951,7 @@ def start_reanalyze():
         raise HTTPException(status_code=409, detail="A scan or re-analysis is already running.")
     with db_lock:
         count = len(analyses.all())
-    threading.Thread(target=_run_reanalyze, daemon=True).start()
+    threading.Thread(target=orchestrator.run_reanalyze, daemon=True).start()
     return {"status": "started", "item_count": count}
 
 
@@ -1975,271 +1768,20 @@ def disconnect_teams_account(account_id: str):
 
 # ── Seed endpoints ─────────────────────────────────────────────────────────────
 
-MAP_PROMPT = """\
-You are analyzing work items from {user_name}'s ops inbox.
-{context_block}
-
-Identify distinct ongoing projects or workstreams and recurring operational concerns from these items.
-Passdown notes describe active operational handoffs — weight them heavily.
-
-Items:
-{items_block}
-
-Respond ONLY with valid JSON — no markdown, no explanation:
-{{
-  "projects": [
-    {{"name": "short project name", "keywords": ["keyword1", "keyword2", "keyword3"]}}
-  ],
-  "concerns": ["brief recurring concern phrase"]
-}}
-"""
-
-REDUCE_PROMPT = """\
-You are synthesizing project intelligence for {user_name}.
-{context_block}
-
-Below are theme extracts from {n_batches} batches covering {n_items} work items.
-
-{themes_block}
-
-Produce a final consolidated list. Merge similar projects. Keep only projects with strong evidence. Topics are recurring concerns that don't fit a specific project.
-
-Respond ONLY with valid JSON — no markdown, no explanation:
-{{
-  "projects": [
-    {{"name": "canonical project name", "keywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"]}}
-  ],
-  "topics": ["watch topic or recurring concern phrase"]
-}}
-"""
-
-
-def _run_seed_job(context: str) -> None:
-    """
-    Background thread for POST /seed.  Implements the full bootstrap state machine:
-
-    waiting_for_ingest → analyzing → review (thread exits; user applies)
-
-    After apply, seed_apply() transitions to reanalyzing → scan_prompt → done.
-    """
-    import time
-    global _seed_job
-    try:
-        user_name = config.USER_NAME or "the user"
-
-        # ── State: waiting_for_ingest ─────────────────────────────────────────
-        # Poll until at least one item has been ingested and the ingest queue
-        # has drained.  Context can be updated via PATCH /seed/context while
-        # waiting, so we read it from _seed_job just before analysis starts.
-        seen_items = False
-        while True:
-            with db_lock:
-                item_count = len(analyses.all())
-            pending = scan_state.get("ingest_pending", 0)
-            if item_count > 0:
-                seen_items = True
-            _seed_job.update({
-                "state":          "waiting_for_ingest",
-                "item_count":     item_count,
-                "ingest_pending": pending,
-                "progress":       (
-                    f"{item_count} item{'s' if item_count != 1 else ''} received"
-                    + (f", {pending} processing…" if pending else
-                       " — ingest complete" if seen_items else "")
-                ),
-            })
-            if seen_items and pending == 0:
-                break
-            if _seed_job.get("cancelled"):
-                _seed_job.update({"state": "idle", "status": "idle"})
-                return
-            time.sleep(3)
-
-        # ── State: analyzing ──────────────────────────────────────────────────
-        # Re-read context now in case it was updated while waiting.
-        context = _seed_job.get("context") or context
-        context_block = f"Context about {user_name}: {context}" if context else ""
-        _seed_job.update({"state": "analyzing", "progress": "Starting analysis…"})
-
-        # 1. Fetch all analyses, sort passdowns first then by priority, cap at 120
-        with db_lock:
-            all_items = analyses.all()
-
-        priority_rank = {"high": 3, "medium": 2, "low": 1}
-
-        def _sort_key(a):
-            """Sort passdowns first, then by descending priority rank."""
-            is_pd = 1 if a.get("is_passdown") else 0
-            pri   = priority_rank.get(a.get("priority", "low"), 1)
-            return (is_pd, pri)
-
-        all_items.sort(key=_sort_key, reverse=True)
-        all_items = all_items[:120]
-
-        passdown_count = sum(1 for a in all_items if a.get("is_passdown"))
-        n_items        = len(all_items)
-
-        batch_size = 6
-        n_batches  = max(1, (n_items + batch_size - 1) // batch_size)
-
-        _seed_job["progress"] = f"Analysing {n_items} items ({passdown_count} passdowns)…"
-
-        # 2. Map pass
-        map_results  = []
-        last_map_err = None
-        for batch_num, batch_start in enumerate(range(0, n_items, batch_size), 1):
-            if _seed_job.get("cancelled") or scan_state["cancelled"]:
-                _seed_job.update({"state": "idle", "status": "idle", "progress": "Cancelled."})
-                return
-            _seed_job["progress"] = f"Map pass: batch {batch_num}/{n_batches}…"
-            batch = all_items[batch_start:batch_start + batch_size]
-            lines = []
-            for a in batch:
-                source   = a.get("source", "?")
-                title    = a.get("title", "(no title)")
-                # Truncate summary to keep prompt small
-                summary  = (a.get("summary", "") or "")[:120]
-                priority = a.get("priority", "low")
-                is_pd    = a.get("is_passdown", False)
-                suffix   = " [passdown]" if is_pd else ""
-                lines.append(f"[{source}]{suffix} {title}: {summary} ({priority})")
-            items_block = "\n".join(lines)
-
-            prompt = MAP_PROMPT.format(
-                user_name=user_name,
-                context_block=context_block,
-                items_block=items_block,
-            )
-            try:
-                with _ollama_sem:
-                    resp = http_requests.post(
-                        config.OLLAMA_URL,
-                        headers=config.ollama_headers(),
-                        json={
-                            "model":   config.OLLAMA_MODEL,
-                            "prompt":  prompt,
-                            "stream":  False,
-                            "format":  "json",
-                            "options": {"temperature": 0.2, "num_predict": 300},
-                        },
-                        timeout=120,
-                    )
-                resp.raise_for_status()
-                data = json.loads(resp.json().get("response", "{}"))
-                map_results.append(data)
-            except Exception as e:
-                last_map_err = str(e)
-                print(f"[seed] map batch {batch_start} failed: {e}")
-                continue
-
-        if not map_results:
-            err_detail = f" ({last_map_err})" if last_map_err else ""
-            _seed_job.update({
-                "state":          "error",
-                "status":         "error",
-                "progress":       f"All map batches failed{err_detail}",
-                "projects":       [],
-                "topics":         [],
-                "item_count":     n_items,
-                "passdown_count": passdown_count,
-            })
-            return
-
-        # 3. Reduce pass
-        _seed_job["progress"] = f"Reduce pass: consolidating {len(map_results)} batches…"
-        themes_parts = []
-        for i, mr in enumerate(map_results):
-            projects_str = json.dumps(mr.get("projects", []))
-            concerns_str = json.dumps(mr.get("concerns", []))
-            themes_parts.append(f"Batch {i + 1}:\n  projects: {projects_str}\n  concerns: {concerns_str}")
-        themes_block = "\n\n".join(themes_parts)
-
-        reduce_prompt = REDUCE_PROMPT.format(
-            user_name=user_name,
-            context_block=context_block,
-            n_batches=len(map_results),
-            n_items=n_items,
-            themes_block=themes_block,
-        )
-
-        try:
-            with _ollama_sem:
-                resp = http_requests.post(
-                    config.OLLAMA_URL,
-                    headers=config.ollama_headers(),
-                    json={
-                        "model":   config.OLLAMA_MODEL,
-                        "prompt":  reduce_prompt,
-                        "stream":  False,
-                        "format":  "json",
-                        "options": {"temperature": 0.2, "num_predict": 400},
-                    },
-                    timeout=120,
-                )
-            resp.raise_for_status()
-            final    = json.loads(resp.json().get("response", "{}"))
-            projects = final.get("projects", [])
-            topics   = final.get("topics", [])
-        except Exception as e:
-            print(f"[seed] reduce failed: {e}")
-            # Fallback: flat merge of map results
-            projects   = []
-            seen_names = set()
-            topics     = []
-            for mr in map_results:
-                for p in mr.get("projects", []):
-                    nm = p.get("name", "")
-                    if nm and nm not in seen_names:
-                        seen_names.add(nm)
-                        projects.append(p)
-                topics.extend(mr.get("concerns", []))
-            topics = list(dict.fromkeys(topics))
-
-        _seed_job.update({
-            "state":          "review",
-            "status":         "running",
-            "progress":       f"Analysis complete — {n_items} items reviewed.",
-            "projects":       projects,
-            "topics":         topics,
-            "item_count":     n_items,
-            "passdown_count": passdown_count,
-        })
-        # Thread exits here.  Frontend reads state="review" and shows the
-        # project/topic editor.  POST /seed/apply continues the state machine.
-
-    except Exception as e:
-        _seed_job.update({"state": "error", "status": "error", "progress": str(e)})
-
-
 @app.post("/seed")
 async def seed_preview(request: Request):
     """
     Start the seed state machine.  Always succeeds immediately — the
     ``waiting_for_ingest`` phase handles empty databases by polling until
-    items arrive.  Returns the current ``_seed_job`` state.
+    items arrive.  Returns the current seed job state.
     """
-    global _seed_job
-    active_states = {"waiting_for_ingest", "analyzing", "reanalyzing", "scanning"}
-    if _seed_job.get("state") in active_states:
-        return _seed_job
-
     body = {}
     try:
         body = await request.json()
     except Exception:
         pass
     context = body.get("context", "") if isinstance(body, dict) else ""
-
-    _seed_job = {
-        "state":    "waiting_for_ingest",
-        "status":   "running",
-        "progress": "Waiting for ingest…",
-        "context":  context,
-        "item_count":     0,
-        "ingest_pending": 0,
-    }
-    threading.Thread(target=_run_seed_job, args=(context,), daemon=True).start()
-    return _seed_job
+    return seeder.start(context)
 
 
 @app.patch("/seed/context")
@@ -2248,16 +1790,13 @@ async def seed_update_context(request: Request):
     Update the user-provided context string while the seed job is in the
     ``waiting_for_ingest`` state.
 
-    The context is read just before the analyzing phase begins, so updates
-    posted during the waiting period are picked up without restarting the job.
-
     :param request: Request body must be JSON with a ``context`` key.
     :type request: Request
     :return: ``{"ok": True}``
     :rtype: dict
     """
     body = await request.json()
-    _seed_job["context"] = body.get("context", "")
+    seeder.update_context(body.get("context", ""))
     return {"ok": True}
 
 
@@ -2266,41 +1805,16 @@ def seed_status():
     """
     Return the current state of the background seed job.
 
-    The returned dict is the module-level ``_seed_job`` singleton, which
-    contains at least ``state``, ``status``, and ``progress``.  When the
-    state is ``"review"``, it also contains ``projects`` and ``topics`` for
-    the frontend editor.
-
-    :return: Current ``_seed_job`` state dict.
+    :return: Current seed job state dict.
     :rtype: dict
     """
-    return _seed_job
+    return seeder.status()
 
 
 @app.post("/seed/apply")
 def seed_apply(body: dict, background_tasks: BackgroundTasks):
     """
     Apply the seed editor's confirmed projects and topics to settings.
-
-    Called after the user reviews and edits the LLM-proposed project/topic
-    list in the frontend.  Steps performed synchronously:
-
-    1. Merges new projects into ``config.PROJECTS`` (skipping duplicates by
-       name, case-insensitive).
-    2. Merges new topics into ``config.FOCUS_TOPICS`` (deduplication,
-       case-insensitive).
-    3. Persists updated settings to ``settings_tbl`` and calls
-       ``config.apply_overrides``.
-    4. Optionally (``retag=True``, default) keyword-matches existing analyses
-       against newly added projects and sets ``project_tag`` on matches.
-
-    Then in background (``_seed_embed_and_correlate``):
-    - Embeds all tagged analyses to populate project centroid vectors.
-    - Sweeps all items through situation formation to warm the correlation layer.
-
-    Also transitions ``_seed_job`` to ``"reanalyzing"`` and starts
-    ``_run_reanalyze`` in a daemon thread, then monitors it via
-    ``_monitor_reanalyze`` to advance the state machine to ``"scan_prompt"``.
 
     :param body: Dict with keys ``projects`` (list), ``topics`` (list), and
                  optionally ``retag`` (bool, default ``True``).
@@ -2310,186 +1824,7 @@ def seed_apply(body: dict, background_tasks: BackgroundTasks):
     :return: ``{"ok": True, "projects_added": N, "topics_added": M, "items_retagged": K}``
     :rtype: dict
     """
-    suggested_projects = body.get("projects", [])
-    suggested_topics   = body.get("topics", [])
-    retag              = body.get("retag", True)
-
-    # 1. Load existing settings
-    with db_lock:
-        existing = settings_tbl.get(doc_id=1) or {}
-
-    current_projects: list[dict] = existing.get("projects", list(config.PROJECTS))
-    current_names = {p.get("name", "").lower() for p in current_projects}
-
-    # 2. Merge projects
-    projects_added = 0
-    for sp in suggested_projects:
-        name = sp.get("name", "").strip()
-        if not name:
-            continue
-        if name.lower() not in current_names:
-            current_projects.append({
-                "name":             name,
-                "keywords":         sp.get("keywords", []),
-                "channels":         [],
-                "learned_keywords": [],
-                "learned_senders":  [],
-            })
-            current_names.add(name.lower())
-            projects_added += 1
-
-    # 3. Merge topics into focus_topics (comma-separated, deduplicated)
-    existing_ft_raw = existing.get("focus_topics", ", ".join(config.FOCUS_TOPICS))
-    existing_topics = [t.strip() for t in existing_ft_raw.split(",") if t.strip()]
-    existing_topics_lower = {t.lower() for t in existing_topics}
-    topics_added = 0
-    for t in suggested_topics:
-        t = t.strip()
-        if t and t.lower() not in existing_topics_lower:
-            existing_topics.append(t)
-            existing_topics_lower.add(t.lower())
-            topics_added += 1
-    new_focus_topics = ", ".join(existing_topics)
-
-    # 4. Save back
-    existing["projects"]     = current_projects
-    existing["focus_topics"] = new_focus_topics
-    with db_lock:
-        if settings_tbl.get(doc_id=1):
-            settings_tbl.update(existing, doc_ids=[1])
-        else:
-            settings_tbl.insert(existing)
-    config.apply_overrides(existing)
-
-    # 5. Optionally retag existing analyses
-    items_retagged = 0
-    if retag and projects_added > 0:
-        # Only consider newly-added projects for retagging
-        new_projects = current_projects[-projects_added:]
-        with db_lock:
-            all_items = analyses.all()
-
-        updates = []
-        for item in all_items:
-            if item.get("project_tag"):
-                continue
-            text = " ".join([
-                item.get("title", ""),
-                item.get("body_preview", ""),
-                item.get("summary", ""),
-            ]).lower()
-            for proj in new_projects:
-                kws = proj.get("keywords", []) + proj.get("learned_keywords", [])
-                if any(kw.lower() in text for kw in kws if kw):
-                    updates.append((item.doc_id, proj["name"]))
-                    items_retagged += 1
-                    break
-
-        if updates:
-            with db_lock:
-                for doc_id, tag in updates:
-                    analyses.update({"project_tag": tag}, doc_ids=[doc_id])
-
-    # 6. Background: embed all newly-tagged items, then sweep situation formation
-    #    across the full corpus.  This is the step that populates centroids and
-    #    warms the correlation layer from a bulk corpus instead of a trickle.
-    def _seed_embed_and_correlate() -> None:
-        """
-        Background task run after ``seed_apply`` to warm the embedding and
-        situation layers from the existing corpus.
-
-        Phase 1 (embedding sweep): iterates all tagged analyses, generates
-        a text embedding from title + body_preview + summary, and calls
-        ``embedder.update_project`` to build/update each project's centroid.
-
-        Phase 2 (situation sweep): calls ``_maybe_form_situation`` on every
-        stored item so that the correlation layer is pre-populated from the
-        bulk corpus rather than forming incrementally only as new items arrive.
-        """
-        print("[seed] starting embedding sweep...")
-        try:
-            from embedder import embed, update_project
-            with db_lock:
-                all_items = analyses.all()
-            for item in all_items:
-                tag = item.get("project_tag")
-                if not tag:
-                    continue
-                text = " ".join(filter(None, [
-                    item.get("title", ""),
-                    item.get("body_preview", ""),
-                    item.get("summary", ""),
-                ]))
-                if not text.strip():
-                    continue
-                try:
-                    vector = embed(text)
-                    if vector:
-                        update_project(
-                            project_name = tag,
-                            item_id      = item.get("item_id", ""),
-                            vector       = vector,
-                            category     = item.get("category", "fyi"),
-                            hierarchy    = item.get("hierarchy", "general"),
-                            source       = item.get("source", ""),
-                            priority     = item.get("priority", "medium"),
-                        )
-                except Exception as e:
-                    print(f"[seed] embed {item.get('item_id')}: {e}")
-            print("[seed] embedding sweep complete")
-        except Exception as e:
-            print(f"[seed] embedding sweep failed: {e}")
-
-        print("[seed] starting situation formation sweep...")
-        try:
-            with db_lock:
-                all_items = analyses.all()
-            item_ids = [item.get("item_id") for item in all_items if item.get("item_id")]
-            with db_lock:
-                scan_state["situations_pending"] += len(item_ids)
-            for iid in item_ids:
-                try:
-                    situation_manager._maybe_form_situation(iid)
-                except Exception as e:
-                    print(f"[seed] situation sweep {iid}: {e}")
-                finally:
-                    with db_lock:
-                        scan_state["situations_pending"] = max(0, scan_state["situations_pending"] - 1)
-            print(f"[seed] situation sweep complete ({len(item_ids)} items)")
-        except Exception as e:
-            print(f"[seed] situation sweep failed: {e}")
-
-    background_tasks.add_task(_seed_embed_and_correlate)
-
-    # Transition state machine → reanalyzing
-    _seed_job.update({
-        "state":    "reanalyzing",
-        "status":   "running",
-        "progress": "Re-analyzing all items with new project config…",
-    })
-    threading.Thread(target=_run_reanalyze, daemon=True).start()
-
-    def _monitor_reanalyze() -> None:
-        """Poll until _run_reanalyze finishes, then advance _seed_job to scan_prompt."""
-        import time
-        time.sleep(1)
-        while scan_state.get("running"):
-            _seed_job["progress"] = scan_state.get("message", "Re-analyzing…")
-            time.sleep(2)
-        _seed_job.update({
-            "state":    "scan_prompt",
-            "status":   "running",
-            "progress": "Re-analysis complete.",
-        })
-
-    threading.Thread(target=_monitor_reanalyze, daemon=True).start()
-
-    return {
-        "ok":             True,
-        "projects_added": projects_added,
-        "topics_added":   topics_added,
-        "items_retagged": items_retagged,
-    }
+    return seeder.apply(body, background_tasks)
 
 
 @app.post("/seed/scan")
@@ -2498,32 +1833,11 @@ def seed_run_scan():
     Transition the seed state machine from ``scan_prompt`` to ``scanning``,
     run a full multi-source scan, then transition to ``done``.
 
-    Starts ``_run_scan`` (all five connectors) in a daemon thread.  A monitor
-    thread (``_monitor_scan``) polls ``scan_state["running"]`` and advances
-    ``_seed_job`` to ``{"state": "done"}`` once the scan completes.
-
     :return: ``{"ok": True}``
     :rtype: dict
     :raises HTTPException 409: If a scan is already running.
     """
-    global _seed_job
-    if scan_state["running"]:
-        raise HTTPException(status_code=409, detail="A scan is already running.")
-    _seed_job.update({"state": "scanning", "status": "running", "progress": "Starting scan…"})
-    sources = ["slack", "github", "jira", "outlook", "teams"]
-    threading.Thread(target=_run_scan, args=(sources,), daemon=True).start()
-
-    def _monitor_scan() -> None:
-        """Poll until _run_scan finishes, then advance _seed_job to done."""
-        import time
-        time.sleep(1)
-        while scan_state.get("running"):
-            _seed_job["progress"] = scan_state.get("message", "Scanning…")
-            time.sleep(2)
-        _seed_job.update({"state": "done", "status": "done", "progress": "Setup complete."})
-
-    threading.Thread(target=_monitor_scan, daemon=True).start()
-    return {"ok": True}
+    return seeder.run_scan(scan_state)
 
 
 @app.post("/seed/skip_scan")
@@ -2532,12 +1846,7 @@ def seed_skip_scan():
     Transition the seed state machine from ``scan_prompt`` to ``done``
     without running a connector scan.
 
-    Allows users who have already seeded via the ingest workflow to skip the
-    optional live-scan step and complete setup immediately.
-
     :return: ``{"ok": True}``
     :rtype: dict
     """
-    global _seed_job
-    _seed_job.update({"state": "done", "status": "done", "progress": "Setup complete."})
-    return {"ok": True}
+    return seeder.skip_scan()

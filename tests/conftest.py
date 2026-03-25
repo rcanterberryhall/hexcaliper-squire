@@ -12,9 +12,9 @@ os.environ["DB_PATH"] = os.path.join(_tmp, "test.db")
 
 import pytest
 from fastapi.testclient import TestClient
-import app as _app
 from app import app, analyses, todos, scan_logs, settings_tbl, situations_tbl, intel_tbl, embeddings_tbl
 import config
+import seeder
 
 
 @pytest.fixture(scope="session")
@@ -35,5 +35,5 @@ def clear_db():
     config.PROJECTS = []
     config.FOCUS_TOPICS = []
     config.NOISE_KEYWORDS = []
-    _app._seed_job = {"status": "idle"}
+    seeder._seed_job = {"status": "idle"}
     yield

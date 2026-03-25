@@ -8,10 +8,12 @@ import json
 import uuid
 from unittest.mock import patch
 
-from app import (
+from situation_manager import (
     _maybe_form_situation,
     _rescore_situation,
     _update_situation_record,
+)
+from app import (
     analyses,
     situations_tbl,
     intel_tbl,
@@ -96,7 +98,7 @@ def test_forms_situation_from_shared_reference():
     _insert_analysis("a1", refs=["proj-42"])
     _insert_analysis("a2", refs=["proj-42"])
 
-    with patch("app._correlator.synthesize_situation", return_value=MOCK_SYNTHESIS):
+    with patch("situation_manager._correlator.synthesize_situation", return_value=MOCK_SYNTHESIS):
         _maybe_form_situation("a1")
 
     all_sits = situations_tbl.all()
@@ -125,7 +127,7 @@ def test_merges_new_item_into_existing_situation():
     _insert_situation(sit_id, ["a1", "a2"])
     _insert_analysis("a3", refs=["proj-99"])
 
-    with patch("app._correlator.synthesize_situation", return_value=MOCK_SYNTHESIS):
+    with patch("situation_manager._correlator.synthesize_situation", return_value=MOCK_SYNTHESIS):
         _maybe_form_situation("a3")
 
     all_sits = situations_tbl.all()
@@ -189,7 +191,7 @@ def test_update_situation_record_runs_synthesis():
     _insert_situation(sit_id, ["c1", "c2"])
 
     distinctive = {**MOCK_SYNTHESIS, "title": "Synthesized Title XYZ"}
-    with patch("app._correlator.synthesize_situation", return_value=distinctive):
+    with patch("situation_manager._correlator.synthesize_situation", return_value=distinctive):
         _update_situation_record(sit_id, ["c1", "c2"])
 
     updated = situations_tbl.get(Q.situation_id == sit_id)
@@ -216,7 +218,7 @@ def test_situation_project_tag_consensus():
     _insert_analysis("e2", refs=["proj-88"], project_tag="alpha")
     _insert_analysis("e3", refs=["proj-88"], project_tag="alpha")
 
-    with patch("app._correlator.synthesize_situation", return_value=MOCK_SYNTHESIS):
+    with patch("situation_manager._correlator.synthesize_situation", return_value=MOCK_SYNTHESIS):
         _maybe_form_situation("e1")
 
     sit = situations_tbl.all()[0]
@@ -226,7 +228,7 @@ def test_situation_project_tag_consensus():
     _insert_analysis("e4", project_tag="beta")
     all_ids = sit["item_ids"] + ["e4"]
 
-    with patch("app._correlator.synthesize_situation", return_value=MOCK_SYNTHESIS):
+    with patch("situation_manager._correlator.synthesize_situation", return_value=MOCK_SYNTHESIS):
         _update_situation_record(sit["situation_id"], all_ids)
 
     updated = situations_tbl.get(Q.situation_id == sit["situation_id"])

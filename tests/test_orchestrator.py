@@ -66,7 +66,7 @@ def _all_connectors_patched(outlook_items=None, github_items=None,
 def test_run_scan_saves_analysis_to_db():
     with _all_connectors_patched(outlook_items=[_raw()]), \
          patch("app.analyze", return_value=_analysis()), \
-         patch("app._spawn_situation_task"):
+         patch("situation_manager._spawn_situation_task"):
         _run_scan(["outlook"])
 
     assert analyses.get(Q.item_id == "x1") is not None
@@ -84,7 +84,7 @@ def test_run_scan_creates_todo_for_action_item():
 
     with _all_connectors_patched(outlook_items=[_raw()]), \
          patch("app.analyze", return_value=result), \
-         patch("app._spawn_situation_task"):
+         patch("situation_manager._spawn_situation_task"):
         _run_scan(["outlook"])
 
     todo = todos.get(Q.item_id == "x1")
@@ -95,7 +95,7 @@ def test_run_scan_creates_todo_for_action_item():
 def test_run_scan_writes_log_on_success():
     with _all_connectors_patched(github_items=[_raw(source="github")]), \
          patch("app.analyze", return_value=_analysis(source="github")), \
-         patch("app._spawn_situation_task"):
+         patch("situation_manager._spawn_situation_task"):
         _run_scan(["github"])
 
     logs = scan_logs.all()
@@ -119,7 +119,7 @@ def test_run_scan_handles_analyze_exception_gracefully():
 
     with _all_connectors_patched(outlook_items=items), \
          patch("app.analyze", side_effect=flaky_analyze), \
-         patch("app._spawn_situation_task"):
+         patch("situation_manager._spawn_situation_task"):
         _run_scan(["outlook"])
 
     assert scan_state["running"] is False
@@ -138,7 +138,7 @@ def test_run_scan_respects_cancellation():
     try:
         with _all_connectors_patched(outlook_items=items), \
              patch("app.analyze", side_effect=cancelling_analyze), \
-             patch("app._spawn_situation_task"):
+             patch("situation_manager._spawn_situation_task"):
             _run_scan(["outlook"])
 
         saved = analyses.all()
@@ -154,7 +154,7 @@ def test_run_scan_respects_cancellation():
 def test_run_scan_sets_running_false_after_completion():
     with _all_connectors_patched(), \
          patch("app.analyze", return_value=_analysis()), \
-         patch("app._spawn_situation_task"):
+         patch("situation_manager._spawn_situation_task"):
         _run_scan(["slack"])
 
     assert scan_state["running"] is False
@@ -196,7 +196,7 @@ def test_run_reanalyze_reprocesses_stored_items():
         return _analysis(item.item_id, priority="high")
 
     with patch("app.analyze", side_effect=high_priority_analyze), \
-         patch("app._spawn_situation_task"):
+         patch("situation_manager._spawn_situation_task"):
         _run_reanalyze()
 
     assert analyses.get(Q.item_id == "r1")["priority"] == "high"
@@ -209,7 +209,7 @@ def test_run_reanalyze_preserves_user_edited_fields():
     _insert_minimal("u1", priority="high")
 
     with patch("app.analyze", return_value=_analysis("u1", priority="low")), \
-         patch("app._spawn_situation_task"):
+         patch("situation_manager._spawn_situation_task"):
         _run_reanalyze()
 
     assert analyses.get(Q.item_id == "u1")["priority"] == "high"
@@ -263,7 +263,7 @@ def test_run_reanalyze_deletes_stale_todos_before_reinserting():
     )
 
     with patch("app.analyze", return_value=new_result), \
-         patch("app._spawn_situation_task"):
+         patch("situation_manager._spawn_situation_task"):
         _run_reanalyze()
 
     all_todos = todos.all()
@@ -285,7 +285,7 @@ def test_run_reanalyze_sorts_passdowns_first():
         return _analysis(item.item_id)
 
     with patch("app.analyze", side_effect=recording_analyze), \
-         patch("app._spawn_situation_task"):
+         patch("situation_manager._spawn_situation_task"):
         _run_reanalyze()
 
     assert call_order[0] == "p1"

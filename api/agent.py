@@ -52,6 +52,7 @@ User context:
 - Email: {user_email}
 - Active projects: {projects_ctx}
 - Watch topics: {topics_ctx}
+- Assignment corrections (learn from these past mistakes): {assignment_corrections_ctx}
 - Task indicators: {task_ctx} — keywords from items previously confirmed as tasks requiring action from {user_name}
 - Approval indicators: {approval_ctx} — keywords from items previously confirmed as approval events affecting {user_name}
 - FYI indicators: {fyi_ctx} — keywords from items previously confirmed as informational only for {user_name}
@@ -140,8 +141,13 @@ Priority rules:
 - low: passdown context, backlog, no deadline pressure
 
 Action item rules:
-- owner="me" ONLY when the action is specifically for {user_name}
-- An imperative or direct question aimed at {user_name} is required for owner="me"
+- Determine owner from context using these signals in priority order:
+  1. Direct address in the body: "John, can you..." or "John, please handle..." → owner is that person, regardless of To/CC position
+  2. The email is To a specific person (not {user_name}) and contains a directive → owner is the To recipient
+  3. The action is explicitly assigned to {user_name} by name, email, or direct question → owner="me"
+  4. No clear assignee → owner="me" only if {user_name} is in To; otherwise omit the action item or set owner to the most likely person
+- Use the person's full name as it appears in the To/CC header (e.g. "John Johnson"), not a first-name guess
+- Do not default to owner="me" just because {user_name} is CC'd — being CC'd means awareness, not ownership
 - Past-tense reports of completed work (e.g. "we installed X", "the issue was resolved") are NOT action items — put them in information_items instead
 - Jira issues: has_action=true unless status is Done/Closed
 - GitHub PR review requests: has_action=true, category=review
@@ -224,6 +230,31 @@ def _noise_ctx() -> str:
     :rtype: str
     """
     return ", ".join(config.NOISE_KEYWORDS[:30]) if config.NOISE_KEYWORDS else "none"
+
+
+def _assignment_corrections_ctx() -> str:
+    """
+    Build a readable summary of past assignment corrections for the LLM prompt.
+
+    Each correction records what the LLM originally inferred as the owner and
+    what the user corrected it to.  Injected as few-shot examples so the model
+    learns to assign ownership more accurately over time.
+
+    Capped at 20 corrections to keep the prompt size reasonable.
+
+    :return: Newline-separated correction examples, or ``"none"`` if empty.
+    :rtype: str
+    """
+    corrections = config.ASSIGNMENT_CORRECTIONS[-20:]
+    if not corrections:
+        return "none"
+    lines = []
+    for c in corrections:
+        desc    = c.get("description", "")
+        llm_own = c.get("llm_owner") or "me"
+        correct = c.get("corrected_to", "")
+        lines.append(f'  - "{desc}": LLM assigned to "{llm_own}", user corrected to "{correct}"')
+    return "\n" + "\n".join(lines)
 
 
 def _task_ctx() -> str:
@@ -324,6 +355,12 @@ _PASSDOWN_PATTERNS = _re.compile(
 )
 _EMAIL_RE = _re.compile(r'[\w.+\-]+@[\w.\-]+\.[a-z]{2,}', _re.IGNORECASE)
 
+# Matches the author field of Microsoft 365 quarantine digest emails.
+_QUARANTINE_AUTHOR_RE = _re.compile(r'quarantine@.*\.microsoft\.com', _re.IGNORECASE)
+
+# Extracts the quarantined sender line from the body, e.g. "Sender:   foo@bar.com"
+_QUARANTINE_SENDER_RE = _re.compile(r'Sender:\s+([\w.+\-]+@[\w.\-]+\.[a-z]{2,})', _re.IGNORECASE)
+
 
 def extract_emails(text: str) -> list[str]:
     """
@@ -338,6 +375,34 @@ def extract_emails(text: str) -> list[str]:
     :rtype: list[str]
     """
     return list({m.lower() for m in _EMAIL_RE.findall(text or "")})
+
+
+# Matches RFC-style "Display Name <email@host>" pairs.
+_NAME_EMAIL_RE = _re.compile(r'([^<;,]+?)\s*<([\w.+\-]+@[\w.\-]+\.[a-z]{2,})>', _re.IGNORECASE)
+
+
+def resolve_owner_email(owner: str, *header_fields: str) -> str | None:
+    """
+    Try to resolve a person's name to an email address from To/CC header fields.
+
+    Splits each header field into ``"Display Name <email>"`` pairs and returns
+    the email for the first entry whose display name contains ``owner`` as a
+    case-insensitive substring.  Used to auto-populate ``assigned_to`` when the
+    LLM sets ``owner`` to someone other than the user.
+
+    :param owner: Person name returned by the LLM (e.g. ``"John Johnson"``).
+    :param header_fields: One or more raw To/CC header strings.
+    :return: Matched email address (lowercase), or ``None`` if no match found.
+    :rtype: str or None
+    """
+    owner_lower = owner.lower().strip()
+    for field in header_fields:
+        for match in _NAME_EMAIL_RE.finditer(field or ""):
+            display_name = match.group(1).strip()
+            email        = match.group(2).lower()
+            if owner_lower in display_name.lower():
+                return email
+    return None
 
 
 def _match_sender(item: RawItem) -> str | None:
@@ -407,6 +472,43 @@ def _detect_passdown(title: str, body: str) -> bool:
         _PASSDOWN_PATTERNS.search(title)
         or _PASSDOWN_PATTERNS.search(body[:300])
     )
+
+
+def _detect_quarantine_noise(item: "RawItem") -> bool:
+    """
+    Deterministically force noise for Microsoft 365 quarantine digest emails
+    whose quarantined sender is not associated with any configured project.
+
+    Returns ``True`` (→ force noise) when:
+    - The item author matches ``_QUARANTINE_AUTHOR_RE`` (a quarantine digest), AND
+    - The body contains a ``Sender:`` line, AND
+    - That sender address does not appear in any project's ``senders`` or
+      ``learned_senders`` list.
+
+    Returns ``False`` when the quarantined sender is a known project sender,
+    allowing normal analysis to proceed so the item surfaces as usual.
+
+    :param item: The raw item to check.
+    :type item: RawItem
+    :return: ``True`` if the item should be forced to noise.
+    :rtype: bool
+    """
+    if not _QUARANTINE_AUTHOR_RE.search(item.author or ""):
+        return False
+
+    match = _QUARANTINE_SENDER_RE.search(item.body or "")
+    if not match:
+        # Quarantine notification but no extractable sender — treat as noise.
+        return True
+
+    quarantined_sender = match.group(1).lower()
+
+    for p in config.PROJECTS:
+        all_senders = list(p.get("senders", [])) + list(p.get("learned_senders", []))
+        if quarantined_sender in {s.lower() for s in all_senders}:
+            return False
+
+    return True
 
 
 _CAUTION_PATTERN = re.compile(
@@ -627,6 +729,11 @@ def analyze(item: RawItem) -> Analysis:
 
     category  = data.get("category", "fyi")
     task_type = data.get("task_type")  # "reply" | "review" | None
+
+    # Deterministic override: quarantine digest with unknown sender → always noise.
+    if _detect_quarantine_noise(item):
+        category = "noise"
+
     action_items = action_items if category not in ("fyi", "noise") else []
 
     # Jira fallback — always surface open tickets even if the LLM returns sparse

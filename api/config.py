@@ -126,10 +126,13 @@ try:
 except Exception:
     PROJECTS: list[dict] = []
 
-NOISE_KEYWORDS:    list[str] = []
-TASK_KEYWORDS:     list[str] = []
-APPROVAL_KEYWORDS: list[str] = []
-FYI_KEYWORDS:      list[str] = []
+NOISE_KEYWORDS:        list[str]  = []
+TASK_KEYWORDS:         list[str]  = []
+APPROVAL_KEYWORDS:     list[str]  = []
+FYI_KEYWORDS:          list[str]  = []
+# Correction examples grown from manual re-assignments.
+# Each entry: {description, llm_owner, corrected_to}
+ASSIGNMENT_CORRECTIONS: list[dict] = []
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
@@ -196,6 +199,8 @@ def apply_overrides(d: dict) -> None:
         setattr(mod, "APPROVAL_KEYWORDS", d["approval_keywords"])
     if "fyi_keywords" in d and isinstance(d["fyi_keywords"], list):
         setattr(mod, "FYI_KEYWORDS", d["fyi_keywords"])
+    if "assignment_corrections" in d and isinstance(d["assignment_corrections"], list):
+        setattr(mod, "ASSIGNMENT_CORRECTIONS", d["assignment_corrections"])
     if "lookback_hours" in d and d["lookback_hours"] is not None:
         setattr(mod, "LOOKBACK_HOURS", int(d["lookback_hours"]))
 

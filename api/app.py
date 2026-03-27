@@ -49,7 +49,7 @@ from pydantic import BaseModel
 
 import config
 import db
-from agent import extract_keywords, extract_emails
+from agent import extract_keywords, extract_emails, resolve_owner_email
 from models import RawItem, Analysis
 import correlator as _correlator
 import situation_manager
@@ -465,7 +465,17 @@ def _save_analysis(a: Analysis, reanalyze: bool = False) -> None:
     with db.lock:
         existing              = db.get_item(a.item_id)
         existing_situation_id = (existing or {}).get("situation_id")
+
+        # Before wiping todos on reanalyze, snapshot any manual assignment
+        # overrides (assigned_to, status) keyed by description so they survive.
+        todo_overrides: dict[str, dict] = {}
         if reanalyze:
+            for t in db.get_todos_for_item(a.item_id):
+                if t.get("assigned_to") or t.get("status") == "assigned":
+                    todo_overrides[t["description"]] = {
+                        "assigned_to": t.get("assigned_to"),
+                        "status":      t.get("status"),
+                    }
             db.delete_todos_for_item(a.item_id)
             db.delete_intel_for_item(a.item_id)
 
@@ -525,6 +535,21 @@ def _save_analysis(a: Analysis, reanalyze: bool = False) -> None:
         if a.has_action and a.category != "fyi":
             for item in a.action_items:
                 if not db.todo_exists(a.item_id, item.description):
+                    # Auto-assign when the LLM identifies the task belongs to
+                    # someone other than the user.  Resolve their email from
+                    # To/CC fields; fall back to the owner name if not found.
+                    auto_assigned_to = None
+                    auto_status      = "open"
+                    if item.owner and item.owner.lower() not in ("me", config.USER_NAME.lower()):
+                        resolved = resolve_owner_email(item.owner, a.to_field, a.cc_field)
+                        auto_assigned_to = resolved or item.owner
+                        auto_status      = "assigned"
+
+                    # Manual overrides (set by the user before a reanalyze) win.
+                    override         = todo_overrides.get(item.description, {})
+                    assigned_to      = override.get("assigned_to") or auto_assigned_to
+                    status           = override.get("status")      or auto_status
+
                     db.insert_todo({
                         "item_id":     a.item_id,
                         "source":      a.source,
@@ -535,6 +560,8 @@ def _save_analysis(a: Analysis, reanalyze: bool = False) -> None:
                         "owner":       item.owner,
                         "priority":    a.priority,
                         "done":        0,
+                        "status":      status,
+                        "assigned_to": assigned_to,
                         "created_at":  now_iso(),
                     })
 
@@ -650,6 +677,26 @@ def reset_db():
     with db.lock:
         db.reset_data_tables()
     return {"ok": True}
+
+
+@app.get("/senders")
+def get_senders():
+    """
+    Return a flat sorted list of all known sender email addresses across all projects.
+
+    Combines static ``senders`` and runtime-learned ``learned_senders`` from
+    every configured project, deduplicates, and returns them sorted.  Used by
+    the frontend assign-picker to offer autocomplete suggestions.
+
+    :return: ``{"senders": [...]}`` — sorted list of unique lowercase addresses.
+    :rtype: dict
+    """
+    seen: set[str] = set()
+    for p in config.PROJECTS:
+        for addr in list(p.get("senders", [])) + list(p.get("learned_senders", [])):
+            if addr:
+                seen.add(addr.lower())
+    return {"senders": sorted(seen)}
 
 
 @app.get("/projects")
@@ -1615,6 +1662,7 @@ def get_stats():
     with db.lock:
         all_a      = db.get_all_items()
         open_todos = db.get_todos(done=False)
+        done_todos = db.get_todos(done=True)
         logs       = db.get_all_scan_logs()
 
     by_source: dict[str, int] = {}
@@ -1636,6 +1684,7 @@ def get_stats():
     return {
         "total_items":           len(all_a),
         "open_todos":            len(open_todos),
+        "done_todos":            len([t for t in done_todos if t.get("done")]),
         "high_priority":         sum(1 for t in open_todos if t.get("priority") == "high"),
         "open_intel":            len(open_intel),
         "by_source":             [{"source": k, "count": v} for k, v in by_source.items()],
@@ -1702,16 +1751,21 @@ def slack_callback(code: str = None, error: str = None):
     )
     r.raise_for_status()
     data = r.json()
+    print(f"[slack/callback] ok={data.get('ok')} error={data.get('error')} "
+          f"authed_user_keys={list(data.get('authed_user', {}).keys())}")
 
     if not data.get("ok"):
+        err = data.get('error', 'unknown')
+        print(f"[slack/callback] OAuth failed: {err}")
         return Response(
             status_code=302,
-            headers={"Location": f"/page/?slack_error={data.get('error', 'unknown')}"},
+            headers={"Location": f"/page/?slack_error={err}"},
         )
 
     authed_user = data.get("authed_user", {})
     token = authed_user.get("access_token")
     if not token:
+        print(f"[slack/callback] No user token in response. authed_user={authed_user}")
         return Response(status_code=302, headers={"Location": "/page/?slack_error=no_user_token"})
 
     team      = data.get("team", {})

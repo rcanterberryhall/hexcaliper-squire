@@ -771,6 +771,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
         <div class="frow"        onclick="setPri('high',this)">  <span class="fl">● High</span>  <span class="fc" id="fc-high">0</span></div>
         <div class="frow"        onclick="setPri('medium',this)"><span class="fl">● Medium</span><span class="fc" id="fc-medium">0</span></div>
         <div class="frow"        onclick="setPri('low',this)">   <span class="fl">● Low</span>   <span class="fc" id="fc-low">0</span></div>
+        <div class="frow"        style="pointer-events:none">    <span class="fl" style="color:var(--muted)">✓ Done</span><span class="fc" id="fc-done">0</span></div>
       </div>
 
       <div class="sb-block">
@@ -811,6 +812,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
           <button class="vtab"        onclick="setView('intel',this)">Current State</button>
           <button class="vtab"        onclick="setView('items',this)">All Items</button>
           <button class="vtab"        onclick="setView('situations',this)">Situations</button>
+          <button class="vtab"        onclick="setView('assigned',this)">Assigned</button>
         </div>
         <div class="toolbar-filters">
           <input type="search" class="search-input" id="searchInput" placeholder="Search…" oninput="onSearch(this.value)" autocomplete="off">
@@ -849,6 +851,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
       <div id="intel-view"></div>
       <div id="items-view"></div>
       <div id="situations-view"></div>
+      <div id="assigned-view" style="display:none"></div>
     </div>
   </div>
 
@@ -1126,7 +1129,8 @@ let allAnalyses     = [];
 let allSituations   = [];
 let allIntel        = [];
 let ingestWasActive = false;
-let allProjects = [];
+let allProjects  = [];
+let knownSenders = [];
 let colWidths       = {}; // { colIndex: px }
 let _resizing       = null;
 let hierarchyFilter = 'all';
@@ -1141,6 +1145,7 @@ let _searchTimer    = null;
 
 async function loadProjectList() {
   try { allProjects = await api('/projects'); } catch(e) { allProjects = []; }
+  try { knownSenders = (await api('/senders')).senders || []; } catch(e) { knownSenders = []; }
   renderSidebarProjects(allAnalyses);
 }
 
@@ -1336,6 +1341,7 @@ async function loadStats() {
     $('st-open').textContent  = s.open_todos;
     $('st-high').textContent  = s.high_priority;
     if ($('st-situations')) $('st-situations').textContent = s.open_situations ?? '—';
+    if ($('fc-done'))       $('fc-done').textContent       = s.done_todos ?? 0;
     if ($('st-intel'))      $('st-intel').textContent      = s.open_intel      ?? '—';
     if (s.last_scan?.finished_at) $('st-scan').textContent = fmtTime(s.last_scan.finished_at);
     const sm = {};
@@ -1380,6 +1386,16 @@ function updateCounts(todos) {
   const c = { all: todos.length, high: 0, medium: 0, low: 0 };
   todos.forEach(t => { if (c[t.priority] !== undefined) c[t.priority]++; });
   Object.entries(c).forEach(([k, v]) => { const el = $('fc-' + k); if (el) el.textContent = v; });
+
+  // Source counts derived from the same todo set so they reflect the Show completed toggle.
+  const sc = {};
+  todos.forEach(t => { if (t.source) sc[t.source] = (sc[t.source] || 0) + 1; });
+  const scAll = Object.values(sc).reduce((a, b) => a + b, 0);
+  $('sc-all').textContent     = scAll;
+  $('sc-outlook').textContent = sc.outlook || 0;
+  $('sc-slack').textContent   = sc.slack   || 0;
+  $('sc-github').textContent  = sc.github  || 0;
+  $('sc-jira').textContent    = sc.jira    || 0;
 }
 
 function _sortTodos(todos) {
@@ -1432,7 +1448,12 @@ function makeTodo(t) {
   const own    = t.owner && t.owner !== 'me' ? `<span class="chip">→ ${esc(t.owner)}</span>` : '';
   const link   = t.url ? `<button class="ia open" onclick="window.open('${esc(t.url)}','_blank')" title="Open source">↗</button>` : '';
   const tagBtn = allProjects.length ? `<button class="ia" onclick="showProjectPicker('${esc(t.item_id || String(t.doc_id))}',this)" title="Tag to project">◈</button>` : '';
-  const proj   = t.project_tag ? `<span class="chip"><span class="badge b-project">${esc(t.project_tag)}</span></span>` : '';
+  const analysis  = allAnalyses.find(a => a.item_id === t.item_id);
+  const projTag   = t.project_tag || analysis?.project_tag;
+  const proj      = projTag ? `<span class="chip"><span class="badge b-project">${esc(projTag)}</span></span>` : '';
+  const catKey    = analysis ? (analysis.task_type ? `task-${analysis.task_type}` : (analysis.category || 'fyi')) : null;
+  const catLabel  = analysis ? (analysis.task_type ? `task · ${analysis.task_type}` : (analysis.category || 'fyi')) : null;
+  const catBadge  = catKey ? `<span class="badge b-${catKey}">${catLabel}</span>` : '';
   const itemIdAttr = esc(t.item_id || String(t.doc_id));
 
   // Checkbox: complete if open, reopen if done/assigned
@@ -1459,8 +1480,10 @@ function makeTodo(t) {
       <div class="todo-desc">${esc(t.description)}</div>
       <div class="todo-meta">
         <span class="chip chip-${t.source}">${srcIcon[t.source] || '·'} ${t.source}</span>
+        ${catBadge}
+        ${proj}
         <span class="chip" style="color:var(--muted)">${esc(trunc(t.title || '', 42))}</span>
-        ${proj}${dl}${own}${assignedChip}
+        ${dl}${own}${assignedChip}
       </div>
     </div>
     <div class="todo-actions">${editBtn}${tagBtn}${link}<button class="ia del" onclick="deleteTodo(${did})" title="Delete">✕</button></div>`;
@@ -1549,6 +1572,11 @@ async function loadItems() {
     updateTypeCounts(allAnalyses);
     renderItems(allAnalyses);
     renderSidebarProjects(allAnalyses);
+    // Re-render todos so category/project badges (which look up allAnalyses) are populated.
+    if (allTodos.length) {
+      const visible = _filterTodos(allTodos);
+      renderTodos(visible);
+    }
   } catch (e) { console.warn('items:', e); }
 }
 
@@ -1745,6 +1773,52 @@ function onDateFilter(val) {
 }
 
 // ── Situations ────────────────────────────────────────────────────────────────
+
+async function loadAssigned() {
+  try {
+    const todos = await api('/todos');
+    renderAssigned(todos.filter(t => t.status === 'assigned' && t.assigned_to));
+  } catch(e) { console.warn('assigned:', e); }
+}
+
+function renderAssigned(todos) {
+  const el = $('assigned-view');
+  if (!el) return;
+  if (!todos.length) {
+    el.innerHTML = `<div class="empty"><div class="empty-icon">⇒</div>
+      <div class="empty-msg">No assigned tasks.\nUse the ⇒ button on any action item to assign it to a colleague.</div></div>`;
+    return;
+  }
+  // Group by assigned_to
+  const groups = {};
+  for (const t of todos) {
+    const key = t.assigned_to;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(t);
+  }
+  const priOrder = { high: 0, medium: 1, low: 2 };
+  el.innerHTML = Object.keys(groups).sort().map(person => {
+    const tasks = groups[person].slice().sort((a, b) =>
+      (priOrder[a.priority] ?? 1) - (priOrder[b.priority] ?? 1)
+    );
+    const rows = tasks.map(t => {
+      const pri = t.priority || 'medium';
+      const dl  = t.deadline ? `<span class="detail-todo-dl" style="margin-left:6px">⚑ ${fmtDate(t.deadline)}</span>` : '';
+      const src = t.source   ? `<span class="badge b-${esc(t.source)}" style="flex-shrink:0">${esc(t.source)}</span>` : '';
+      const title = t.title  ? `<span style="color:var(--muted);font-size:10px;margin-left:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.title)}</span>` : '';
+      return `<div class="todo assigned" style="display:flex;align-items:center;gap:8px;cursor:default">
+        <span class="badge b-${pri}" style="flex-shrink:0">${pri}</span>
+        ${src}
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.description)}</span>
+        ${title}${dl}
+      </div>`;
+    }).join('');
+    return `<div style="margin-bottom:18px">
+      <div style="font-size:11px;font-weight:600;color:var(--blue);padding:8px 14px 4px;letter-spacing:.05em;border-bottom:1px solid var(--border2)">⇒ ${esc(person)} <span style="color:var(--muted);font-weight:400">(${tasks.length})</span></div>
+      ${rows}
+    </div>`;
+  }).join('');
+}
 
 async function loadSituations() {
   try {
@@ -2011,10 +2085,12 @@ function setView(v, el) {
   $('intel-view').style.display      = v === 'intel'      ? 'block' : 'none';
   $('items-view').style.display      = v === 'items'      ? 'block' : 'none';
   $('situations-view').style.display = v === 'situations' ? 'block' : 'none';
+  $('assigned-view').style.display   = v === 'assigned'   ? 'block' : 'none';
   _updateToolbarForView(v);
   if (v === 'intel')      loadIntel();
   if (v === 'items')      loadItems();
   if (v === 'situations') loadSituations();
+  if (v === 'assigned')   loadAssigned();
 }
 
 // ── Sidebar (mobile) ──────────────────────────────────────────────────────────
@@ -2188,9 +2264,12 @@ function showAssignPicker(docId, itemId, anchorEl) {
   const picker = document.createElement('div');
   picker.className = 'assign-picker';
   picker.dataset.docId = String(docId);
+  const datalistId = 'assign-senders-list';
+  const options = knownSenders.map(s => `<option value="${esc(s)}">`).join('');
   picker.innerHTML = `
     <div class="assign-picker-label">Assign to</div>
-    <input class="assign-input" type="email" placeholder="colleague@company.com">
+    <datalist id="${datalistId}">${options}</datalist>
+    <input class="assign-input" type="email" placeholder="colleague@company.com" list="${datalistId}">
     <button class="save-btn" style="width:100%;padding:5px" onclick="confirmAssign(${docId},'${esc(itemId)}')">Assign ⇒</button>`;
   const rect = anchorEl.getBoundingClientRect();
   picker.style.top  = (rect.bottom + 6) + 'px';
@@ -3007,7 +3086,16 @@ loadProjectList();
     openSettings();
   } else if (p.get('slack_error')) {
     history.replaceState({}, '', '/page/');
-    $('statusMsg').textContent = 'Slack connect failed: ' + p.get('slack_error');
+    const slackErrorMessages = {
+      'bad_client_secret':  'Slack connection failed: Client Secret is incorrect or expired — update it in Settings.',
+      'invalid_client_id':  'Slack connection failed: Client ID is invalid — check Settings.',
+      'bad_redirect_uri':   'Slack connection failed: Redirect URI mismatch — check your Slack app config.',
+      'no_user_token':      'Slack connection failed: No user token returned — ensure your Slack app requests user scopes.',
+      'access_denied':      'Slack connection failed: Access was denied.',
+    };
+    const slackErr = p.get('slack_error');
+    const msg = slackErrorMessages[slackErr] || `Slack connection failed: ${slackErr}`;
+    alert(msg);
     openSettings();
   } else if (p.get('teams_connected')) {
     history.replaceState({}, '', '/page/');

@@ -542,7 +542,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .stat-situations { grid-column: 1 / -1; }
 .stat-intel      { grid-column: 1 / -1; }
 
-/* ── Intel cards ── */
+/* ── Briefing (Current State) ── */
 #intel-view { flex: 1; overflow-y: auto; padding: 12px 18px; display: none; position: relative; }
 .intel-group { margin-bottom: 18px; }
 .intel-group-label { font-size: 9px; letter-spacing: .18em; color: var(--muted); text-transform: uppercase; margin-bottom: 6px; padding: 0 2px; }
@@ -559,6 +559,26 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .intel-relevance { font-size: 10px; color: var(--muted); font-style: italic; margin-bottom: 5px; line-height: 1.4; }
 .intel-meta { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
 .intel-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.briefing-meta { font-size: 10px; color: var(--muted); margin-bottom: 14px; letter-spacing: .06em; }
+.briefing-section {
+  border: 1px solid var(--border2); border-left: 3px solid var(--accent);
+  border-radius: var(--r); background: var(--surface);
+  padding: 14px 16px; margin-bottom: 14px; animation: fadein .25s ease;
+}
+.briefing-section-title {
+  font-family: var(--display); font-size: 12px; font-weight: 700;
+  letter-spacing: .08em; color: var(--accent); margin-bottom: 8px;
+}
+.briefing-summary {
+  font-size: 12px; color: var(--text); line-height: 1.6; white-space: pre-wrap;
+  margin-bottom: 10px;
+}
+.briefing-refs { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.briefing-ref-head { font-size: 9px; letter-spacing: .14em; color: var(--muted); text-transform: uppercase; margin-bottom: 2px; }
+.briefing-ref-item {
+  font-size: 11px; color: var(--blue); cursor: pointer; padding: 2px 0;
+}
+.briefing-ref-item:hover { color: var(--accent); text-decoration: underline; }
 
 /* ── Detail panel ── */
 .detail-panel {
@@ -762,6 +782,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
           <div class="stat"><div class="stat-val c-blue"   id="st-scan">—</div><div class="stat-lbl">Last Scan</div></div>
           <div class="stat"><div class="stat-val c-red" id="st-situations">—</div><div class="stat-lbl">Situations</div></div>
           <div class="stat stat-intel"><div class="stat-val c-blue" id="st-intel">—</div><div class="stat-lbl">Intel Items</div></div>
+          <div class="stat" style="cursor:pointer" onclick="reviewNoise()" title="Click to review noise items"><div class="stat-val c-muted" id="st-noise">—</div><div class="stat-lbl">Noise</div></div>
         </div>
       </div>
 
@@ -832,6 +853,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
         <label class="show-done" id="showDoneLbl"><input type="checkbox" id="showDone" onchange="loadTodos()"> Show completed</label>
         <label class="show-done"><input type="checkbox" id="showHidden" onchange="onShowHidden()"> Show hidden</label>
         <button class="ia" id="addActionBtn" onclick="toggleAddAction()" title="Add manual action item" style="margin-left:auto;padding:3px 9px;font-size:11px">+ Add action</button>
+        <button class="ia" id="regenerateBriefingBtn" onclick="regenerateBriefing()" title="Re-generate briefing with current data" style="display:none;margin-left:auto;padding:3px 9px;font-size:11px">↺ Regenerate</button>
       </div>
       <div id="addActionForm" style="display:none;padding:10px 14px;border-bottom:1px solid var(--border2);background:var(--surface);gap:8px;flex-wrap:wrap;align-items:flex-end" class="frow">
         <input id="newTodoDesc"     type="text"   placeholder="Description…"  style="flex:2;min-width:180px;padding:4px 8px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:12px" onkeydown="if(event.key==='Enter')submitNewTodo()">
@@ -1342,6 +1364,10 @@ async function loadStats() {
     $('st-high').textContent  = s.high_priority;
     if ($('st-situations')) $('st-situations').textContent = s.open_situations ?? '—';
     if ($('fc-done'))       $('fc-done').textContent       = s.done_todos ?? 0;
+    if ($('st-noise')) {
+      const noiseCount = (s.by_category || []).find(c => c.category === 'noise')?.count ?? 0;
+      $('st-noise').textContent = noiseCount;
+    }
     if ($('st-intel'))      $('st-intel').textContent      = s.open_intel      ?? '—';
     if (s.last_scan?.finished_at) $('st-scan').textContent = fmtTime(s.last_scan.finished_at);
     const sm = {};
@@ -1950,90 +1976,110 @@ async function resynthSituation(sitId) {
   } catch(e) { $('statusMsg').textContent = 'Resynth failed: ' + e.message; }
 }
 
-// ── Intel (Current State) ──────────────────────────────────────────────────────
+// ── Briefing (Current State) ───────────────────────────────────────────────────
 
 async function loadIntel() {
+  // Load intel for stats counter, then show briefing in the view.
   try {
     const qs = showHidden ? '?include_dismissed=true' : '';
     allIntel = await api('/intel' + qs);
-    renderIntel(allIntel);
     const el = $('st-intel');
     if (el) el.textContent = allIntel.filter(i => !i.dismissed).length;
   } catch(e) { console.warn('intel:', e); }
+  await loadBriefing();
 }
 
-function renderIntel(items) {
+function renderIntel() {
+  // Kept as no-op alias so existing call sites compile without error.
+  loadBriefing();
+}
+
+let _currentBriefing = null;
+
+async function loadBriefing() {
   const el = $('intel-view');
-  if (projectFilter !== 'all') {
-    items = items.filter(i =>
-      projectFilter === '__none__' ? !i.project_tag : i.project_tag === projectFilter
-    );
+  if (!el) return;
+  try {
+    _currentBriefing = await api('/briefing');
+    renderBriefing(_currentBriefing);
+  } catch(e) {
+    el.innerHTML = `<div class="empty"><div class="empty-icon">◻</div><div class="empty-msg">Could not load briefing.</div></div>`;
+    console.warn('briefing:', e);
   }
-  if (!items.length) {
-    el.innerHTML = `<div class="empty"><div class="empty-icon">◻</div><div class="empty-msg">No current state items yet.\nIntel accumulates as items are scanned — status updates,\ncompleted actions, and key facts will appear here.</div></div>`;
+}
+
+function renderBriefing(data) {
+  const el = $('intel-view');
+  if (!el) return;
+  if (!data || !data.sections || !data.sections.length) {
+    el.innerHTML = `<div class="empty"><div class="empty-icon">◻</div>
+      <div class="empty-msg">No briefing yet.\nA briefing is auto-generated after each scan.\nClick ↺ Regenerate to create one now.</div></div>`;
     return;
   }
-  const _sortIntel = arr => {
-    const a = arr.slice();
-    if (sortBy === 'newest')   return a.sort((x,y) => (y.timestamp||'').localeCompare(x.timestamp||''));
-    if (sortBy === 'oldest')   return a.sort((x,y) => (x.timestamp||'').localeCompare(y.timestamp||''));
-    return a.sort((x,y) => _priRank(x.priority) - _priRank(y.priority) || (y.timestamp||'').localeCompare(x.timestamp||''));
-  };
-  // Group by project_tag, then untagged
-  const groups = {};
-  _sortIntel(items).forEach(i => {
-    const k = i.project_tag || '—';
-    if (!groups[k]) groups[k] = [];
-    groups[k].push(i);
-  });
-  const sortedKeys = Object.keys(groups).sort((a, b) => a === '—' ? 1 : b === '—' ? -1 : a.localeCompare(b));
-  el.innerHTML = sortedKeys.map(proj => `
-    <div class="intel-group">
-      <div class="intel-group-label">${proj === '—' ? 'Untagged' : esc(proj)}</div>
-      ${groups[proj].map(i => makeIntelCard(i)).join('')}
-    </div>`).join('');
+  const ts = data.generated_at
+    ? `<div class="briefing-meta">Generated ${fmtTime(data.generated_at)}</div>`
+    : '';
+  const sections = data.sections.map(sec => {
+    const title = sec.project || 'General';
+    const summary = sec.summary || '';
+    let refs = '';
+    if (sec.situations && sec.situations.length) {
+      const rows = sec.situations.map(s =>
+        `<div class="briefing-ref-item" onclick="jumpToSituation('${esc(s.situation_id)}')">◈ ${esc(s.title)}</div>`
+      ).join('');
+      refs += `<div class="briefing-refs"><div class="briefing-ref-head">Situations</div>${rows}</div>`;
+    }
+    if (sec.todos && sec.todos.length) {
+      const priOrder = { high: 0, medium: 1, low: 2 };
+      const sorted = sec.todos.slice().sort((a, b) => (priOrder[a.priority] ?? 1) - (priOrder[b.priority] ?? 1));
+      const rows = sorted.map(t =>
+        `<div class="briefing-ref-item"><span class="badge b-${esc(t.priority||'medium')}" style="margin-right:5px">${esc(t.priority||'medium')}</span>${esc(t.description)}</div>`
+      ).join('');
+      refs += `<div class="briefing-refs" style="margin-top:8px"><div class="briefing-ref-head">Open Actions</div>${rows}</div>`;
+    }
+    return `<div class="briefing-section">
+      <div class="briefing-section-title">${esc(title)}</div>
+      <div class="briefing-summary">${esc(summary)}</div>
+      ${refs}
+    </div>`;
+  }).join('');
+  el.innerHTML = ts + sections;
 }
 
-function makeIntelCard(i) {
-  const did  = i.doc_id || 0;
-  const proj = i.project_tag ? `<span class="chip"><span class="badge b-project">${esc(i.project_tag)}</span></span>` : '';
-  const link = i.url ? `<button class="ia open" onclick="window.open('${esc(i.url)}','_blank')" title="Open source">↗</button>` : '';
-  const ts   = i.timestamp ? `<span class="chip" style="color:var(--muted)">${fmtTime(i.timestamp)}</span>` : '';
-  const actions = i.dismissed
-    ? `<button class="restore-btn" onclick="restoreIntel(${did})" title="Restore">↩ restore</button>`
-    : `${link}<button class="ia del" onclick="dismissIntel(${did})" title="Dismiss">✕</button>`;
-  return `<div class="intel-card${i.dismissed ? ' row-hidden' : ''}">
-    <div class="intel-body" onclick="openItemDetail('${esc(i.item_id)}')">
-      <div class="intel-fact">${esc(i.fact)}</div>
-      ${i.relevance ? `<div class="intel-relevance">${esc(i.relevance)}</div>` : ''}
-      <div class="intel-meta">
-        <span class="chip chip-${i.source}">${srcIcon[i.source] || '·'} ${esc(i.source)}</span>
-        <span class="chip" style="color:var(--muted)">${esc(trunc(i.title || '', 38))}</span>
-        ${proj}${ts}
-      </div>
-    </div>
-    <div class="intel-actions">${actions}</div>
-  </div>`;
-}
-
-async function dismissIntel(id) {
+async function regenerateBriefing() {
+  const btn = $('regenerateBriefingBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '↻ Generating…'; }
   try {
-    await api(`/intel/${id}`, 'PATCH', { dismissed: true });
-    allIntel = allIntel.map(i => i.doc_id === id ? {...i, dismissed: true} : i);
-    renderIntel(allIntel);
-    const el = $('st-intel');
-    if (el) el.textContent = allIntel.filter(i => !i.dismissed).length;
-  } catch(e) { console.warn('dismissIntel:', e); }
+    await api('/briefing/generate', 'POST');
+    // Poll until a new briefing arrives (up to ~30s)
+    const before = _currentBriefing?.generated_at || '';
+    let attempts = 0;
+    const poll = setInterval(async () => {
+      attempts++;
+      try {
+        const b = await api('/briefing');
+        if ((b.generated_at || '') !== before || attempts >= 30) {
+          clearInterval(poll);
+          _currentBriefing = b;
+          renderBriefing(b);
+          if (btn) { btn.disabled = false; btn.textContent = '↺ Regenerate'; }
+        }
+      } catch(e) { clearInterval(poll); if (btn) { btn.disabled = false; btn.textContent = '↺ Regenerate'; } }
+    }, 1000);
+  } catch(e) {
+    if (btn) { btn.disabled = false; btn.textContent = '↺ Regenerate'; }
+    console.warn('regenerateBriefing:', e);
+  }
 }
 
-async function restoreIntel(id) {
-  try {
-    await api(`/intel/${id}`, 'PATCH', { dismissed: false });
-    allIntel = allIntel.map(i => i.doc_id === id ? {...i, dismissed: false} : i);
-    renderIntel(allIntel);
-    const el = $('st-intel');
-    if (el) el.textContent = allIntel.filter(i => !i.dismissed).length;
-  } catch(e) { console.warn('restoreIntel:', e); }
+function jumpToSituation(sitId) {
+  const sitTab = Array.from(document.querySelectorAll('.vtab')).find(t => t.textContent.trim() === 'Situations');
+  if (sitTab) setView('situations', sitTab);
+  // Highlight the card after render
+  setTimeout(() => {
+    const card = $('sit-' + sitId);
+    if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); card.style.outline = '1px solid var(--accent)'; }
+  }, 300);
 }
 
 function openItemDetail(itemId) {
@@ -2042,10 +2088,14 @@ function openItemDetail(itemId) {
 }
 
 function _updateToolbarForView(v) {
-  const showDoneLbl  = $('showDoneLbl');
-  const scoreOpt     = $('sortOptScore');
-  if (showDoneLbl) showDoneLbl.style.display = v === 'todos' ? '' : 'none';
-  if (scoreOpt)    scoreOpt.style.display    = v === 'situations' ? '' : 'none';
+  const showDoneLbl      = $('showDoneLbl');
+  const scoreOpt         = $('sortOptScore');
+  const addActionBtn     = $('addActionBtn');
+  const regenBriefingBtn = $('regenerateBriefingBtn');
+  if (showDoneLbl)      showDoneLbl.style.display      = v === 'todos' ? '' : 'none';
+  if (scoreOpt)         scoreOpt.style.display         = v === 'situations' ? '' : 'none';
+  if (addActionBtn)     addActionBtn.style.display     = v === 'intel' ? 'none' : '';
+  if (regenBriefingBtn) regenBriefingBtn.style.display = v === 'intel' ? '' : 'none';
   // If "score" is selected but we left situations, fall back to priority
   if (v !== 'situations' && sortBy === 'score') {
     sortBy = 'priority';
@@ -2075,6 +2125,17 @@ function onShowHidden() {
   else if (currentView === 'todos')      { const v = _filterTodos(allTodos); renderTodos(v); updateCounts(v); }
   else if (currentView === 'intel')      { loadIntel(); }
   else if (currentView === 'situations') { loadSituations(); }
+}
+
+function reviewNoise() {
+  // Switch to All Items with Show Hidden enabled so noise items are visible.
+  const showHiddenCb = $('showHidden');
+  if (showHiddenCb && !showHiddenCb.checked) {
+    showHiddenCb.checked = true;
+    onShowHidden();
+  }
+  const itemsTab = document.querySelector('.vtab[onclick*="items"]');
+  if (itemsTab) setView('items', itemsTab);
 }
 
 function setView(v, el) {

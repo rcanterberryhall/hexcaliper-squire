@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+from unittest.mock import patch
 
 # Add api/ and scripts/ to path before any app imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
@@ -12,9 +13,10 @@ os.environ["DB_PATH"] = os.path.join(_tmp, "test.db")
 
 import pytest
 from fastapi.testclient import TestClient
-from app import app, analyses, todos, scan_logs, settings_tbl, situations_tbl, intel_tbl, embeddings_tbl
+from app import app, analyses, todos, scan_logs, settings_tbl, situations_tbl, intel_tbl, embeddings_tbl, briefings_tbl
 import config
 import seeder
+import orchestrator
 
 
 @pytest.fixture(scope="session")
@@ -32,8 +34,11 @@ def clear_db():
     situations_tbl.truncate()
     intel_tbl.truncate()
     embeddings_tbl.truncate()
+    briefings_tbl.truncate()
     config.PROJECTS = []
     config.FOCUS_TOPICS = []
     config.NOISE_KEYWORDS = []
     seeder._seed_job = {"status": "idle"}
-    yield
+    # Prevent orchestrator from calling the real LLM briefing builder in tests.
+    with patch.object(orchestrator, "_generate_briefing", None):
+        yield

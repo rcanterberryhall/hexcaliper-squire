@@ -182,6 +182,12 @@ def _create_schema(c: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_sit_dismissed ON situations(dismissed);
     CREATE INDEX IF NOT EXISTS idx_sit_project   ON situations(project_tag);
 
+    CREATE TABLE IF NOT EXISTS briefings (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        generated_at TEXT    NOT NULL,
+        content      TEXT    NOT NULL DEFAULT '{}'
+    );
+
     CREATE TABLE IF NOT EXISTS settings (
         id   INTEGER PRIMARY KEY DEFAULT 1,
         data TEXT    NOT NULL DEFAULT '{}'
@@ -604,6 +610,32 @@ def save_settings(data: dict) -> None:
         "ON CONFLICT(id) DO UPDATE SET data = excluded.data",
         (payload,),
     )
+
+
+# ── Briefing operations ────────────────────────────────────────────────────────
+
+def save_briefing(content: dict) -> None:
+    """Persist the latest briefing, replacing any previous one."""
+    c = conn()
+    c.execute("DELETE FROM briefings")
+    c.execute(
+        "INSERT INTO briefings (generated_at, content) VALUES (?, ?)",
+        (_now_iso(), json.dumps(content)),
+    )
+
+
+def get_briefing() -> dict | None:
+    """Return the latest briefing, or None if none exists."""
+    row = conn().execute(
+        "SELECT generated_at, content FROM briefings ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        content = json.loads(row["content"])
+    except Exception:
+        content = {}
+    return {"generated_at": row["generated_at"], **content}
 
 
 # ── Scan log operations ────────────────────────────────────────────────────────

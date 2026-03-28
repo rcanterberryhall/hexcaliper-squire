@@ -45,19 +45,22 @@ CONNECTORS = {
 _scan_state:          dict = {}
 _save_analysis              = None
 _spawn_situation_task       = None
+_generate_briefing          = None
 
 
-def init(scan_state: dict, save_analysis_fn, spawn_situation_fn) -> None:
+def init(scan_state: dict, save_analysis_fn, spawn_situation_fn,
+         generate_briefing_fn=None) -> None:
     """
     Inject shared state and callables from app.py.
 
     Must be called once at startup before any scan or ingest endpoints
     are invoked.
     """
-    global _scan_state, _save_analysis, _spawn_situation_task
+    global _scan_state, _save_analysis, _spawn_situation_task, _generate_briefing
     _scan_state           = scan_state
     _save_analysis        = save_analysis_fn
     _spawn_situation_task = spawn_situation_fn
+    _generate_briefing    = generate_briefing_fn
 
 
 def get_sem() -> threading.Semaphore:
@@ -70,6 +73,23 @@ def _now_iso() -> str:
 
 
 # ── Pipeline functions ─────────────────────────────────────────────────────────
+
+def _generate_briefing_bg() -> None:
+    """
+    Call the injected briefing generator in a background thread.
+
+    No-ops silently if ``generate_briefing_fn`` was not provided to ``init()``.
+    """
+    if not _generate_briefing:
+        return
+    try:
+        content = _generate_briefing()
+        with db.lock:
+            db.save_briefing(content)
+        print(f"[briefing] generated {len(content.get('sections', []))} sections")
+    except Exception as e:
+        print(f"[briefing] error: {e}")
+
 
 def run_scan(sources: list[str]) -> None:
     """
@@ -146,8 +166,10 @@ def run_scan(sources: list[str]) -> None:
         else:
             _scan_state["message"] = (
                 f"Done — {actions} action items found across "
-                f"{len(all_items)} items from {', '.join(sources)}."
+                f"{len(all_items)} items from {', '.join(sources)}. Generating briefing…"
             )
+            if results:
+                _generate_briefing_bg()
     except Exception as e:
         with db.lock:
             db.insert_scan_log({
@@ -244,8 +266,10 @@ def run_reanalyze() -> None:
             })
         _scan_state["message"] = (
             f"Re-analysis complete — {len(results)} items processed, "
-            f"{actions} action items found."
+            f"{actions} action items found. Generating briefing…"
         )
+        if results:
+            _generate_briefing_bg()
     except Exception as e:
         _scan_state["message"] = f"Re-analysis error: {e}"
         print(f"[reanalyze] {e}")

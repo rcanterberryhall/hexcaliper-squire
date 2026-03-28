@@ -49,7 +49,7 @@ from pydantic import BaseModel
 
 import config
 import db
-from agent import extract_keywords, extract_emails, resolve_owner_email
+from agent import extract_keywords, extract_emails, resolve_owner_email, generate_project_briefing
 from models import RawItem, Analysis
 import correlator as _correlator
 import situation_manager
@@ -379,6 +379,13 @@ class _EmbeddingsProxy:
         db.conn().execute("DELETE FROM embeddings")
 
 
+class _BriefingsProxy:
+    """TinyDB-compatible proxy for the briefings table (truncate only)."""
+
+    def truncate(self):
+        db.conn().execute("DELETE FROM briefings")
+
+
 # Expose as module-level names so tests can import them from app
 analyses       = _AnalysesProxy()
 todos          = _TodosProxy()
@@ -387,6 +394,7 @@ situations_tbl = _SituationsProxy()
 settings_tbl   = _SettingsProxy()
 scan_logs      = _ScanLogsProxy()
 embeddings_tbl = _EmbeddingsProxy()
+briefings_tbl  = _BriefingsProxy()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -585,7 +593,8 @@ def _save_analysis(a: Analysis, reanalyze: bool = False) -> None:
 
 
 orchestrator.init(scan_state, save_analysis_fn=_save_analysis,
-                  spawn_situation_fn=situation_manager._spawn_situation_task)
+                  spawn_situation_fn=situation_manager._spawn_situation_task,
+                  generate_briefing_fn=lambda: _build_briefing())
 
 seeder.init(scan_state,
             run_scan_fn=orchestrator.run_scan,
@@ -1426,6 +1435,116 @@ def patch_intel(doc_id: int, body: dict):
     if "dismissed" in body:
         with db.lock:
             db.update_intel_by_id(doc_id, {"dismissed": 1 if body["dismissed"] else 0})
+    return {"ok": True}
+
+
+# ── Briefing ──────────────────────────────────────────────────────────────────
+
+def _build_briefing() -> dict:
+    """
+    Generate a project-status briefing using the LLM.
+
+    Only projects (and the untagged pool) that have had intel, situation, or
+    todo activity since the last briefing are included, saving LLM tokens.
+
+    :return: Briefing dict with ``generated_at`` and ``sections`` list.
+    :rtype: dict
+    """
+    with db.lock:
+        last        = db.get_briefing()
+        all_intel   = db.get_all_intel(dismissed=False)
+        all_todos   = db.get_todos(done=False)
+        all_sits    = db.get_all_situations(include_dismissed=False)
+        all_items   = db.get_all_items()
+
+    cutoff = last["generated_at"] if last else "1970-01-01T00:00:00+00:00"
+
+    # Collect project tags with activity since last briefing.
+    active_projects: set[str | None] = set()
+    for i in all_intel:
+        if (i.get("created_at") or "") > cutoff:
+            active_projects.add(i.get("project_tag"))
+    for s in all_sits:
+        if (s.get("last_updated") or "") > cutoff:
+            active_projects.add(s.get("project_tag"))
+    for t in all_todos:
+        if (t.get("created_at") or "") > cutoff:
+            item = next((a for a in all_items if a.get("item_id") == t.get("item_id")), {})
+            active_projects.add(item.get("project_tag"))
+
+    sections = []
+    for project in sorted(p for p in active_projects if p):  # named projects first
+        intel_facts  = [i["fact"] for i in all_intel    if i.get("project_tag") == project]
+        sit_lines    = [f"{s['title']} ({s.get('status','')}"
+                        f"{' — score '+str(round(s['score'],1)) if s.get('score') else ''})"
+                        for s in all_sits if s.get("project_tag") == project]
+        item_ids     = {a["item_id"] for a in all_items if a.get("project_tag") == project}
+        todo_descs   = [t["description"] for t in all_todos if t.get("item_id") in item_ids]
+        sit_refs     = [{"situation_id": s["situation_id"], "title": s["title"]}
+                        for s in all_sits if s.get("project_tag") == project]
+        todo_refs    = [{"doc_id": t["id"], "description": t["description"],
+                         "priority": t.get("priority","medium")}
+                        for t in all_todos if t.get("item_id") in item_ids]
+
+        summary = generate_project_briefing(project, intel_facts, sit_lines, todo_descs)
+        sections.append({
+            "project":    project,
+            "summary":    summary,
+            "situations": sit_refs,
+            "todos":      todo_refs,
+        })
+
+    # Untagged pool — only if active.
+    if None in active_projects:
+        untagged_items = {a["item_id"] for a in all_items if not a.get("project_tag")}
+        intel_facts  = [i["fact"] for i in all_intel  if not i.get("project_tag")]
+        sit_lines    = [f"{s['title']} ({s.get('status','')})"
+                        for s in all_sits if not s.get("project_tag")]
+        todo_descs   = [t["description"] for t in all_todos if t.get("item_id") in untagged_items]
+        sit_refs     = [{"situation_id": s["situation_id"], "title": s["title"]}
+                        for s in all_sits if not s.get("project_tag")]
+        todo_refs    = [{"doc_id": t["id"], "description": t["description"],
+                         "priority": t.get("priority","medium")}
+                        for t in all_todos if t.get("item_id") in untagged_items]
+        summary = generate_project_briefing("General", intel_facts, sit_lines, todo_descs)
+        sections.append({
+            "project":    None,
+            "summary":    summary,
+            "situations": sit_refs,
+            "todos":      todo_refs,
+        })
+
+    return {"sections": sections}
+
+
+@app.get("/briefing")
+def get_briefing():
+    """
+    Return the latest cached briefing, or an empty response if none exists.
+
+    :return: Briefing dict with ``generated_at`` and ``sections``, or ``{}``.
+    :rtype: dict
+    """
+    with db.lock:
+        briefing = db.get_briefing()
+    return briefing or {}
+
+
+@app.post("/briefing/generate")
+def generate_briefing(background_tasks: BackgroundTasks):
+    """
+    Trigger briefing generation in the background.
+
+    :return: ``{"ok": True}``
+    :rtype: dict
+    """
+    def _run():
+        content = _build_briefing()
+        with db.lock:
+            db.save_briefing(content)
+        print(f"[briefing] generated {len(content.get('sections', []))} sections")
+
+    background_tasks.add_task(_run)
     return {"ok": True}
 
 

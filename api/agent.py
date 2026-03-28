@@ -287,6 +287,66 @@ def _fyi_ctx() -> str:
     return ", ".join(config.FYI_KEYWORDS[:30]) if config.FYI_KEYWORDS else "none"
 
 
+BRIEFING_PROMPT = """You are a personal ops assistant for {user_name}.
+Write a 2-3 sentence status briefing for the project "{project_name}".
+
+Recent intel and status updates:
+{intel_facts}
+
+Active situations:
+{situations}
+
+Open action items:
+{action_items}
+
+Write a concise paragraph that tells {user_name} where this project stands right now, what is actively in progress, and what needs attention. Be specific — reference concrete items. Do not use filler phrases like "it is important to note" or "in summary". Return plain text only, no markdown.
+"""
+
+
+def generate_project_briefing(
+    project_name: str,
+    intel_facts:  list[str],
+    situations:   list[str],
+    action_items: list[str],
+) -> str:
+    """
+    Ask the LLM to write a 2-3 sentence status paragraph for a project.
+
+    :param project_name: Name of the project (or ``"General"`` for untagged).
+    :param intel_facts:  Recent intel fact strings for this project.
+    :param situations:   Active situation title + status strings.
+    :param action_items: Open action item description strings.
+    :return: Prose status paragraph, or empty string on failure.
+    :rtype: str
+    """
+    def _fmt(items: list[str], limit: int) -> str:
+        return "\n".join(f"- {i}" for i in items[:limit]) if items else "- (none)"
+
+    try:
+        response = requests.post(
+            config.OLLAMA_URL,
+            headers=config.ollama_headers(),
+            json={
+                "model":   config.OLLAMA_MODEL,
+                "prompt":  BRIEFING_PROMPT.format(
+                    user_name    = config.USER_NAME or "the user",
+                    project_name = project_name,
+                    intel_facts  = _fmt(intel_facts,  10),
+                    situations   = _fmt(situations,    5),
+                    action_items = _fmt(action_items,  8),
+                ),
+                "stream":  False,
+                "options": {"temperature": 0.3, "num_predict": 256},
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.json().get("response", "").strip()
+    except Exception as e:
+        print(f"[agent] generate_project_briefing({project_name}): {e}")
+        return ""
+
+
 KEYWORD_PROMPT = """Extract 5 to 10 short keywords or phrases that best characterize this content for project "{project_name}".
 Focus on technical terms, system names, product names, process names, and domain-specific concepts.
 Avoid generic words like "update", "issue", "please", "team", "message".
@@ -686,6 +746,7 @@ def analyze(item: RawItem) -> Analysis:
                 user_email   = config.USER_EMAIL or "",
                 projects_ctx  = _projects_ctx(),
                 topics_ctx    = _topics_ctx(),
+                assignment_corrections_ctx = _assignment_corrections_ctx(),
                 task_ctx      = _task_ctx(),
                 approval_ctx  = _approval_ctx(),
                 fyi_ctx       = _fyi_ctx(),

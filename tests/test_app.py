@@ -439,3 +439,36 @@ def test_reanalyze_rejects_concurrent_scan(client):
         assert r.status_code == 409
     finally:
         scan_state["running"] = False
+
+
+# ── /briefing ──────────────────────────────────────────────────────────────────
+
+def test_get_briefing_empty(client):
+    """GET /briefing returns empty dict when no briefing has been generated."""
+    r = client.get("/briefing")
+    assert r.status_code == 200
+    assert r.json() == {}
+
+
+def test_post_briefing_generate_returns_ok(client):
+    """POST /briefing/generate schedules the job and returns ok immediately."""
+    from unittest.mock import patch
+    with patch("app._build_briefing", return_value={"sections": []}):
+        r = client.post("/briefing/generate")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+
+def test_get_briefing_returns_cached_content(client):
+    """GET /briefing returns the most recently saved briefing."""
+    import db
+    content = {"sections": [{"project": "Alpha", "summary": "All good.", "situations": [], "todos": []}]}
+    with db.lock:
+        db.save_briefing(content)
+    r = client.get("/briefing")
+    assert r.status_code == 200
+    body = r.json()
+    assert "sections" in body
+    assert len(body["sections"]) == 1
+    assert body["sections"][0]["project"] == "Alpha"
+    assert "generated_at" in body

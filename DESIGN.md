@@ -54,9 +54,9 @@ Email sources (Outlook and Thunderbird) cannot run inside Docker because they re
 
 | Module | Responsibility |
 |--------|---------------|
-| `app.py` | FastAPI routes, HTTP layer, background task dispatch, project/noise learning |
-| `orchestrator.py` | Scan, re-analysis, and ingest pipeline execution; Ollama concurrency semaphore |
-| `agent.py` | Prompt construction, Ollama call, JSON response parsing → `Analysis` |
+| `app.py` | FastAPI routes, HTTP layer, background task dispatch, project/noise/category learning, briefing builder |
+| `orchestrator.py` | Scan, re-analysis, and ingest pipeline execution; Ollama concurrency semaphore; triggers briefing after each run |
+| `agent.py` | Prompt construction, Ollama call, JSON response parsing → `Analysis`; per-project briefing generation |
 | `db.py` | SQLite schema, connection management, all CRUD helpers |
 | `graph.py` | Knowledge graph CRUD, context retrieval, GraphRAG scoring |
 | `situation_manager.py` | Cross-source situation formation, LLM synthesis, score decay |
@@ -109,6 +109,12 @@ sequenceDiagram
 
     UI->>API: GET /scan/status [polling]
     API-->>UI: {progress, message}
+
+    Note over Orch: After all items processed:
+    Orch->>Agent: generate_project_briefing() [per active project]
+    Agent->>Ollama: POST /api/generate
+    Ollama-->>Agent: briefing text
+    Orch->>DB: save_briefing(content)
 ```
 
 `POST /scan` returns immediately with `{"status": "started"}`. The actual work happens in a background thread so the HTTP response is never blocked on LLM inference. The browser polls `GET /scan/status` every few seconds to update the progress bar and current-item display.
@@ -350,6 +356,12 @@ erDiagram
         text centroids
     }
 
+    briefings {
+        int  id PK
+        text generated_at
+        text content
+    }
+
     items ||--o{ todos : "item_id"
     items ||--o{ intel : "item_id"
     items }o--|| situations : "situation_id"
@@ -396,7 +408,60 @@ This makes noise learning asymmetric with project learning in an intentional way
 
 ---
 
-## 12. Outlook Sidecar
+## 12. Category Learning
+
+When a user changes an item's category via `PATCH /analyses/{item_id}` or marks it irrelevant via `POST /analyses/{item_id}/noise`, Squire runs background keyword extraction and merges the results into the appropriate per-category list in config:
+
+| User action | List updated |
+|-------------|-------------|
+| Change to `task` | `TASK_KEYWORDS` |
+| Change to `approval` | `APPROVAL_KEYWORDS` |
+| Change to `fyi` | `FYI_KEYWORDS` |
+| Change to `noise` / mark irrelevant | `NOISE_KEYWORDS` |
+
+All four lists are injected into every subsequent LLM prompt as labelled context blocks — for example, "Task indicators: agile, sprint, review PR". This creates a per-category positive-signal loop alongside the existing noise-suppression loop: marking items teaches the model both what to suppress and what to emphasise for each category.
+
+`fyi` is used as the default category when no strong indicators exist for `task`, `approval`, or `noise`. This reflects its role as the catch-all for informational items that do not require action.
+
+---
+
+## 13. Assignment Learning
+
+When the LLM identifies that an action item belongs to someone other than the user (i.e., `owner` is not `"me"`), Squire attempts to resolve the owner name to an email address by scanning the item's `To` and `CC` headers using an RFC-style name/email parser. If found, the action item is automatically marked `status="assigned"` and `assigned_to=<resolved email>`.
+
+If the user manually overrides an assignment, that override is preserved through re-analysis cycles: before deleting stale todos during reanalysis, Squire snapshots `assigned_to` and `status` values for existing rows, then re-applies them after the new todos are inserted. This means a manual reassignment is never lost by a routine reanalyze run.
+
+Assignment corrections — items where the user changed the assignment — are fed back into the LLM as few-shot examples in `config.ASSIGNMENT_CORRECTIONS`. These are formatted as prompt context: "When a message is addressed To John Johnson and asks them to complete a task, set owner to John Johnson." The model learns from these examples on the next scan or ingest, without any retraining.
+
+---
+
+## 14. Project Briefing
+
+After every scan or reanalyze run, Squire auto-generates a project briefing and caches it in the `briefings` table. The briefing is also available on demand via `POST /briefing/generate`.
+
+The briefing is scoped to efficiency: only projects (and the untagged pool) that have had new intel, situation, or todo activity since the last briefing are included in the LLM call. Inactive projects are silently omitted, keeping the prompt token count proportional to what has actually changed.
+
+For each active project, `generate_project_briefing()` in `agent.py` synthesises a short prose summary from the available intel facts, open situation titles and statuses, and open action item descriptions. The result is stored as a JSON document with a `sections` array, one entry per project:
+
+```json
+{
+  "generated_at": "2026-03-27T14:00:00+00:00",
+  "sections": [
+    {
+      "project": "Alpha",
+      "summary": "Two open situations pending...",
+      "situations": [{"situation_id": "...", "title": "..."}],
+      "todos": [{"doc_id": 42, "description": "...", "priority": "high"}]
+    }
+  ]
+}
+```
+
+The "Current State" tab in the UI displays the cached briefing as a formatted newsletter-style view: one card per project section, with the prose summary followed by linked situations (clicking jumps to the Situations tab) and a priority-sorted list of open actions. A "↺ Regenerate" button triggers an on-demand rebuild and polls until the new content arrives.
+
+---
+
+## 15. Outlook Sidecar
 
 ```mermaid
 flowchart LR
@@ -417,7 +482,7 @@ Bodies are truncated to 3000 characters and run through a blank-line collapse (`
 
 ---
 
-## 13. Concurrency Model
+## 16. Concurrency Model
 
 ```mermaid
 flowchart TD

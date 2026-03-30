@@ -628,35 +628,39 @@ def _mask(val: str) -> str:
 @app.get("/gpu")
 def gpu_stats():
     """
-    Return live GPU utilisation, VRAM usage, and temperature via NVML.
+    Return live GPU utilisation, VRAM usage, and temperature via NVML for all
+    detected GPUs.
 
-    Used by the frontend GPU meter widget.  Returns ``{"ok": False}`` when
+    Used by the frontend GPU meter widgets.  Returns ``{"ok": False}`` when
     ``pynvml`` is not installed or no NVIDIA device is present — the UI will
-    fade the meter gracefully in that case.
+    fade the meters gracefully in that case.
 
-    :return: Dict with ``ok``, and when successful: ``name``, ``gpu_util``
-        (int %), ``mem_used`` (bytes), ``mem_total`` (bytes),
-        ``temperature`` (°C).
+    :return: Dict with ``ok``, and when successful: ``gpus`` — a list of
+        per-device dicts each containing ``name``, ``gpu_util`` (int %),
+        ``mem_used`` (bytes), ``mem_total`` (bytes), ``temperature`` (°C).
     :rtype: dict
     """
     try:
         import pynvml
         pynvml.nvmlInit()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        util   = pynvml.nvmlDeviceGetUtilizationRates(handle)
-        mem    = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        temp   = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-        name   = pynvml.nvmlDeviceGetName(handle)
-        if isinstance(name, bytes):
-            name = name.decode()
-        return {
-            "ok":         True,
-            "name":       name,
-            "gpu_util":   util.gpu,
-            "mem_used":   mem.used,
-            "mem_total":  mem.total,
-            "temperature": temp,
-        }
+        count = pynvml.nvmlDeviceGetCount()
+        gpus = []
+        for i in range(count):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+            util   = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            mem    = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            temp   = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            name   = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode()
+            gpus.append({
+                "name":        name,
+                "gpu_util":    util.gpu,
+                "mem_used":    mem.used,
+                "mem_total":   mem.total,
+                "temperature": temp,
+            })
+        return {"ok": True, "gpus": gpus}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 

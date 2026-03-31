@@ -8,3 +8,4 @@ tinydb==4.8.0
 sentence-transformers==3.4.1
 numpy==2.2.3
 pynvml==11.5.0
+psutil==6.1.1

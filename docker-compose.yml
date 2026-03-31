@@ -33,10 +33,10 @@ services:
       LOOKBACK_HOURS:   "48"
     volumes:
       - ./data:/app/data
-      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
-    devices:
-      - /dev/nvidiactl:/dev/nvidiactl
-      - /dev/nvidia0:/dev/nvidia0
+      # - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro  # uncomment when P40s are installed
+    # devices:  # uncomment when P40s are installed (or run setup_gpu.sh)
+    #   - /dev/nvidiactl:/dev/nvidiactl
+    #   - /dev/nvidia0:/dev/nvidia0
     restart: unless-stopped
     networks:
       - app

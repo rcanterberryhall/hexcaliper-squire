@@ -39,6 +39,8 @@ Module-level singletons:
 """
 import json
 import threading
+import psutil as _psutil
+_psutil.cpu_percent()  # prime interval counter so first real call is accurate
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -663,6 +665,27 @@ def gpu_stats():
         return {"ok": True, "gpus": gpus}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+@app.get("/system")
+def system_stats():
+    """
+    Return live CPU utilisation and RAM usage via psutil.
+
+    Always available (no optional dependency).  Used by the frontend
+    system meter widgets alongside the GPU meters.
+
+    :return: Dict with ``ok``, ``cpu_util`` (int %), ``mem_used`` (bytes),
+        ``mem_total`` (bytes).
+    :rtype: dict
+    """
+    mem = _psutil.virtual_memory()
+    return {
+        "ok":        True,
+        "cpu_util":  int(_psutil.cpu_percent(interval=None)),
+        "mem_used":  mem.used,
+        "mem_total": mem.total,
+    }
 
 
 @app.get("/health")

@@ -2190,3 +2190,13 @@ def seed_skip_scan():
     :rtype: dict
     """
     return seeder.skip_scan()
+
+
+@app.get("/merllm/status")
+def merllm_status():
+    """Proxy GET /api/merllm/status from merLLM for the frontend status indicator."""
+    try:
+        r = http_requests.get(f"{config.MERLLM_URL}/api/merllm/status", timeout=3)
+        return r.json()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "mode": "unknown"}

@@ -100,6 +100,26 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .gpu-vram { font-size:9px; color:var(--muted); }
 @media(max-width:768px){ #gpu-meters, #sys-meters { display:none; } }
 
+/* ── merLLM indicator ── */
+.merllm-indicator {
+  display:flex; align-items:center; gap:5px;
+  padding:3px 10px;
+  border-left:1px solid var(--border2); border-right:1px solid var(--border2);
+  text-decoration:none; color:var(--muted);
+  font-size:10px; letter-spacing:.06em; text-transform:uppercase;
+  transition:color .2s; cursor:pointer;
+}
+.merllm-indicator:hover { color:var(--text); }
+.merllm-dot {
+  width:7px; height:7px; border-radius:50%; background:var(--muted);
+  flex-shrink:0; transition:background .3s;
+}
+.merllm-dot.day           { background:#3fb950; }
+.merllm-dot.night         { background:#a78bfa; }
+.merllm-dot.transitioning { background:#d29922; }
+.merllm-dot.unknown       { background:#555; }
+@media(max-width:768px) { .merllm-indicator { display:none; } }
+
 /* ── Progress ── */
 .progress-track { background: var(--border); }
 .progress-fill  { height: 2px; background: var(--accent); box-shadow: 0 0 8px var(--accent); transition: width .4s ease; width: 0; }
@@ -754,6 +774,10 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
       </div>
       <div id="sys-meters"></div>
       <div id="gpu-meters"></div>
+      <a id="merllm-indicator" class="merllm-indicator" href="http://localhost:11400/web/" target="_blank" title="merLLM — click to open dashboard">
+        <span id="merllm-dot" class="merllm-dot"></span>
+        <span id="merllm-label">merLLM</span>
+      </a>
       <button class="scan-btn" id="seedBtn" onclick="openSeed()" title="Bootstrap project intelligence from existing data" style="background:rgba(212,160,23,.08);border-color:var(--amber);color:var(--amber);min-width:90px">◈ Seed</button>
       <button class="scan-btn" id="reanalyzeBtn" onclick="startReanalyze()" title="Re-run LLM analysis on all stored items with current project settings" style="background:rgba(64,184,255,.06);border-color:var(--blue);color:var(--blue);min-width:90px">↺ Re-analyze</button>
       <button class="help-btn" onclick="openHelp()" title="Help">?</button>
@@ -3187,6 +3211,28 @@ async function pollSystem() {
 }
 pollSystem();
 setInterval(pollSystem, 3000);
+
+async function pollMerllm() {
+  const dot   = $('merllm-dot');
+  const label = $('merllm-label');
+  if (!dot || !label) return;
+  try {
+    const r = await fetch('/merllm/status');
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    const mode = d.mode || 'unknown';
+    dot.className = 'merllm-dot ' + mode;
+    const queue = d.queue?.total ?? 0;
+    label.textContent = 'merLLM' + (queue > 0 ? ` (${queue})` : '');
+    dot.title = `Mode: ${mode}` + (d.warnings?.length ? '\n⚠ ' + d.warnings.join('\n⚠ ') : '');
+    dot.style.boxShadow = d.warnings?.length ? '0 0 0 2px rgba(210,153,34,.4)' : '';
+  } catch (_) {
+    dot.className = 'merllm-dot unknown';
+    label.textContent = 'merLLM';
+  }
+}
+pollMerllm();
+setInterval(pollMerllm, 15000);
 
 function clearSearch() { $('searchInput').value = ''; searchQuery = ''; }
 clearSearch();

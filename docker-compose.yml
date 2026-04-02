@@ -18,8 +18,9 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      OLLAMA_URL:       "http://host.docker.internal:11435/api/generate"
-      OLLAMA_MODEL:     "qwen3:32b"
+      OLLAMA_URL:       "http://host.docker.internal:11400/api/generate"
+      MERLLM_URL:       "http://host.docker.internal:11400"
+      OLLAMA_MODEL:     "qwen3:30b-a3b"
       CF_CLIENT_ID:     ""
       CF_CLIENT_SECRET: ""
       SLACK_BOT_TOKEN:  "xoxb-your-token"

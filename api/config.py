@@ -69,8 +69,9 @@ def _get(key: str, default: str = "") -> str:
 
 # ── Ollama / Hexcaliper ───────────────────────────────────────────────────────
 
-OLLAMA_URL   = _get("OLLAMA_URL",   "https://ollama.hexcaliper.com/api/generate")
-OLLAMA_MODEL = _get("OLLAMA_MODEL", "llama3.2")
+OLLAMA_URL   = _get("OLLAMA_URL",   "http://host.docker.internal:11400/api/generate")
+OLLAMA_MODEL = _get("OLLAMA_MODEL", "qwen3:30b-a3b")
+MERLLM_URL   = _get("MERLLM_URL",   "http://host.docker.internal:11400")
 
 # Cloudflare Access service token for authenticating requests to Ollama.
 CF_CLIENT_ID     = _get("CF_CLIENT_ID")

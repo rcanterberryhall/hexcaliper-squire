@@ -15,9 +15,11 @@ services:
 
   page-api:
     build: ./api
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      OLLAMA_URL:       "https://ollama.hexcaliper.com/api/generate"
-      OLLAMA_MODEL:     "llama3:8b"
+      OLLAMA_URL:       "http://host.docker.internal:11435/api/generate"
+      OLLAMA_MODEL:     "qwen3:32b"
       CF_CLIENT_ID:     ""
       CF_CLIENT_SECRET: ""
       SLACK_BOT_TOKEN:  "xoxb-your-token"
@@ -33,10 +35,11 @@ services:
       LOOKBACK_HOURS:   "48"
     volumes:
       - ./data:/app/data
-      # - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro  # uncomment when P40s are installed
-    # devices:  # uncomment when P40s are installed (or run setup_gpu.sh)
-    #   - /dev/nvidiactl:/dev/nvidiactl
-    #   - /dev/nvidia0:/dev/nvidia0
+      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
+    devices:
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidia1:/dev/nvidia1
     restart: unless-stopped
     networks:
       - app

@@ -336,7 +336,7 @@ def generate_project_briefing(
                     action_items = _fmt(action_items,  8),
                 ),
                 "stream":  False,
-                "options": {"temperature": 0.3, "num_predict": 256},
+                "options": {"temperature": 0.3, "num_predict": 256, "num_ctx": 8192},
             },
             timeout=60,
         )
@@ -381,7 +381,7 @@ def extract_keywords(project_name: str, title: str, body: str) -> list[str]:
                 ),
                 "stream":  False,
                 "format":  "json",
-                "options": {"temperature": 0.1, "num_predict": 256},
+                "options": {"temperature": 0.1, "num_predict": 256, "num_ctx": 8192},
             },
             timeout=60,
         )
@@ -761,7 +761,7 @@ def analyze(item: RawItem) -> Analysis:
             ),
             "stream":  False,
             "format":  "json",
-            "options": {"temperature": 0.1, "num_predict": 768},
+            "options": {"temperature": 0.1, "num_predict": 768, "num_ctx": 8192},
         },
         timeout=90,
     )

@@ -1143,6 +1143,21 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
     </div>
 
     <div class="help-section">
+      <h3>Scan progress</h3>
+      <p>While a scan or re-analysis is running, the progress bar reflects how many items have been processed versus the total. The status message shows <strong>Analyzing N/Total items — ~X min remaining</strong> once at least one item has completed, giving a rolling estimate based on the last 10 items.</p>
+    </div>
+
+    <div class="help-section">
+      <h3>Re-analysis item ordering</h3>
+      <p>When running <strong>↺ Re-analyze</strong>, items are processed in priority order: <strong>user</strong> tier first (items directly addressed to you), then <strong>project</strong>, then <strong>topic</strong>, and finally <strong>general</strong>. Within each tier, newest items are processed first so your most urgent context is updated earliest.</p>
+    </div>
+
+    <div class="help-section">
+      <h3>Night-mode batch processing</h3>
+      <p>When <strong>↺ Re-analyze</strong> is triggered and the connected merLLM instance reports night mode, re-analysis jobs are submitted to merLLM's batch queue instead of being sent to Ollama directly. This avoids competing with interactive use during off-hours. Results are applied automatically in the background — no action needed. The status message will read <em>Re-analysis queued — N items sent to batch</em> when this path is active.</p>
+    </div>
+
+    <div class="help-section">
       <h3>Keyboard shortcuts</h3>
       <table class="help-table">
         <tr><th>Key</th><th>Action</th></tr>
@@ -1343,11 +1358,24 @@ async function pollScan() {
   try {
     const s            = await api('/scan/status');
     const sitsPending  = s.situations_pending || 0;
-    const pct          = s.total > 0 ? (s.progress / s.total * 100) : (s.running ? 25 : 100);
+
+    let pct;
+    if (s.total_items > 0 && s.completed_items !== undefined) {
+      pct = s.completed_items / s.total_items * 100;
+    } else {
+      pct = s.total > 0 ? (s.progress / s.total * 100) : (s.running ? 25 : 100);
+    }
     $('pbar').style.width = pct + '%';
 
     if (s.running) {
-      $('statusMsg').textContent = s.message;
+      let msg = s.message;
+      if (s.total_items > 0 && s.completed_items !== undefined) {
+        msg = `Analyzing ${s.completed_items}/${s.total_items} items`;
+        if (s.estimated_minutes_remaining > 0) {
+          msg += ` — ~${s.estimated_minutes_remaining} min remaining`;
+        }
+      }
+      $('statusMsg').textContent = msg;
     } else if (sitsPending > 0) {
       // Main analysis done; situation synthesis still running on GPU
       setStatus('scanning');

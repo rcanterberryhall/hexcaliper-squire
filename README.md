@@ -440,3 +440,38 @@ Every analysed item is indexed into a lightweight knowledge graph (`api/graph.py
 | `authored_by`     | 0.40 | Item sent or created by the same person          |
 
 When the LLM analyses an item, up to four related items are retrieved from the graph, scored by edge weight × recency decay (14-day half-life), and injected into the prompt as `GraphRAG context`. This lets the model reason about conversation threads and project workstreams across sources without re-scanning all history.
+
+## Phase 4c features
+
+### Scan progress estimation
+
+`GET /scan/status` now returns three additional fields alongside the existing response:
+
+| Field                          | Type    | Description                                                                                    |
+|--------------------------------|---------|------------------------------------------------------------------------------------------------|
+| `total_items`                  | integer | Total items to be processed in the current run                                                 |
+| `completed_items`              | integer | Items processed so far                                                                         |
+| `estimated_minutes_remaining`  | float   | Rolling estimate based on average per-item time across the last 10 items; 0 when not running  |
+
+The progress bar in the UI is driven by `completed_items / total_items * 100` when these fields are present, and the status message shows `Analyzing N/Total items — ~X min remaining` while analysis is in progress.
+
+### Re-analysis item ordering
+
+`POST /reanalyze` now processes items in priority order rather than insertion order:
+
+1. `user` tier first (items directly addressed to you)
+2. `project` tier second
+3. `topic` tier third
+4. `general` tier last
+
+Within each tier, items are processed newest-first by timestamp, ensuring your most time-sensitive context is refreshed earliest in every re-analysis run.
+
+### Night-mode batch processing (merLLM integration)
+
+When `POST /reanalyze` is triggered, Parsival checks `GET {MERLLM_URL}/api/merllm/status`. If the response is `{"mode": "night", ...}`, re-analysis jobs are submitted to `POST {MERLLM_URL}/api/batch/submit` instead of calling Ollama directly. This avoids contending with interactive GPU use during off-hours.
+
+Each submitted job stores a `batch_job_id` on the item record. A background polling thread (60-second interval) checks `GET {MERLLM_URL}/api/batch/result/{job_id}` for each pending job, parses the completed response, and applies the result exactly as a direct analysis would — updating the analysis record, todos, intel, knowledge graph, and situation formation.
+
+If merLLM is unreachable or returns a non-night mode, re-analysis proceeds with direct Ollama calls as normal. If a batch submission fails for an individual item, that item falls back to direct Ollama automatically.
+
+Set the `MERLLM_URL` environment variable (default: `http://host.docker.internal:11400`) to point at your merLLM instance.

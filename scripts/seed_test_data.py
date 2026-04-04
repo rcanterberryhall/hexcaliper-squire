@@ -9,7 +9,7 @@ data.
 Usage:
     python seed_test_data.py                          # post to default URL
     python seed_test_data.py --url http://localhost:8001
-    python seed_test_data.py --url https://squire.hexcaliper.com/page/api
+    python seed_test_data.py --url https://lancellmot.hexcaliper.com/page/api
 
 The script posts directly to /ingest without Cloudflare headers, so run it
 from a context that can reach the API without CF Access (local or tunnelled).
@@ -19,7 +19,7 @@ import uuid
 import requests
 from datetime import datetime, timedelta, timezone
 
-PAGE_API_URL = "https://squire.hexcaliper.com/page/api"
+PAGE_API_URL = "https://lancellmot.hexcaliper.com/page/api"
 
 
 def _ts(days_ago: float, hour: int = 8) -> str:

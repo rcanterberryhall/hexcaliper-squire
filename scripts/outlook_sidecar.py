@@ -30,7 +30,7 @@ import sys
 import requests
 from datetime import datetime, timedelta
 
-PAGE_API_URL        = "https://parcival.hexcaliper.com/page/api"
+PAGE_API_URL        = "https://parsival.hexcaliper.com/page/api"
 LOOKBACK_HOURS      = 48
 MAX_EMAILS          = 75
 SEED_LOOKBACK_HOURS = 720   # 30 days

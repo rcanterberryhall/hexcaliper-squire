@@ -1847,7 +1847,7 @@ def get_stats():
 
 # ── Slack OAuth ────────────────────────────────────────────────────────────────
 
-_SLACK_REDIRECT_URI  = "https://parcival.hexcaliper.com/page/api/slack/callback"
+_SLACK_REDIRECT_URI  = "https://parsival.hexcaliper.com/page/api/slack/callback"
 _SLACK_USER_SCOPES   = (
     "channels:history,channels:read,groups:history,groups:read,"
     "im:history,im:read,mpim:history,mpim:read,search:read,users:read"
@@ -1972,7 +1972,7 @@ def disconnect_slack_workspace(team_id: str):
 
 # ── Teams OAuth ────────────────────────────────────────────────────────────────
 
-_TEAMS_REDIRECT_URI = "https://parcival.hexcaliper.com/page/api/teams/callback"
+_TEAMS_REDIRECT_URI = "https://parsival.hexcaliper.com/page/api/teams/callback"
 _TEAMS_SCOPES       = "Chat.Read ChannelMessage.Read.All Channel.ReadBasic.All offline_access"
 
 

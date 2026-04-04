@@ -2647,8 +2647,10 @@ async function openSeed() {
   $('seedModal').classList.add('open');
   try {
     const st = await api('/seed/status', 'GET');
+    // 'idle' = never started; show the start screen instead of the word "idle"
+    if (!st.state || st.state === 'idle') st.state = 'start';
     renderSeedState(st);
-    if (st.state && !['idle', 'done', 'error', 'start', 'review'].includes(st.state)) {
+    if (!['idle', 'done', 'error', 'start', 'review'].includes(st.state)) {
       startSeedPolling();
     }
   } catch(e) {

@@ -116,6 +116,13 @@ def _poll_batch_jobs() -> None:
     """
     Background thread: every 60 s poll merLLM for completed batch jobs and
     apply their results to the corresponding items.
+
+    Status handling:
+      200            — job complete; parse and apply result
+      409 queued/running — still in merLLM queue; keep waiting
+      409 failed     — merLLM failed the job; clear batch_job_id so the
+                       item is picked up by the next direct reanalyze run
+      404            — job unknown to merLLM (e.g. DB wiped); clear and retry
     """
     while True:
         time.sleep(60)
@@ -128,16 +135,28 @@ def _poll_batch_jobs() -> None:
                     continue
                 try:
                     r = http_requests.get(
-                        f"{config.MERLLM_URL}/api/batch/result/{job_id}",
+                        f"{config.MERLLM_URL}/api/batch/results/{job_id}",
                         timeout=10,
                     )
                     if r.status_code == 404:
+                        # Job unknown — clear so item is retried on next reanalyze
+                        print(f"[batch] job {job_id} not found in merLLM — clearing for retry")
+                        with db.lock:
+                            db.set_batch_job_id(rec["item_id"], None)
+                        continue
+                    if r.status_code == 409:
+                        detail = r.json().get("detail", "")
+                        if "failed" in detail:
+                            print(f"[batch] job {job_id} failed in merLLM — clearing for retry")
+                            with db.lock:
+                                db.set_batch_job_id(rec["item_id"], None)
+                        # queued or running — still in progress, keep waiting
                         continue
                     r.raise_for_status()
                     data = r.json()
-                    if data.get("status") != "complete":
+                    response_text = data.get("result", "")
+                    if not response_text:
                         continue
-                    response_text = data.get("response", "")
                 except Exception as e:
                     print(f"[batch] poll {job_id}: {e}")
                     continue

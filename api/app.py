@@ -75,6 +75,12 @@ _saved_settings = db.get_settings()
 if _saved_settings:
     config.apply_overrides(_saved_settings)
 
+# Resume polling for any batch jobs that were in-flight before a restart
+_pending_on_startup = db.get_items_with_pending_batch()
+if _pending_on_startup:
+    print(f"[startup] {len(_pending_on_startup)} item(s) have pending batch jobs — resuming poll thread")
+    orchestrator._ensure_batch_poll_thread()
+
 
 # ── Compatibility shims (TinyDB-like API over SQLite for tests) ────────────────
 # These proxy objects expose a minimal TinyDB-compatible surface so existing

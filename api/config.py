@@ -67,6 +67,12 @@ def _get(key: str, default: str = "") -> str:
     return os.environ.get(key, default).strip()
 
 
+# ── Credential encryption ─────────────────────────────────────────────────────
+# Set to a strong random value to encrypt OAuth tokens at rest in SQLite.
+# Leave unset for plaintext storage (backward compatible).
+# Changing this key after tokens have been stored makes them unreadable.
+CREDENTIALS_KEY = _get("CREDENTIALS_KEY", "")
+
 # ── Ollama / Hexcaliper ───────────────────────────────────────────────────────
 
 OLLAMA_URL   = _get("OLLAMA_URL",   "http://host.docker.internal:11400/api/generate")
@@ -183,9 +189,23 @@ def apply_overrides(d: dict) -> None:
         if key in d and d[key] is not None:
             setattr(mod, var, str(d[key]))
     if "slack_user_tokens" in d and isinstance(d["slack_user_tokens"], list):
-        setattr(mod, "SLACK_USER_TOKENS", d["slack_user_tokens"])
+        import crypto as _crypto  # local import to avoid circular dependency
+        slack_tokens = [
+            {**t, "token": _crypto.decrypt_secret(t["token"])} if "token" in t else t
+            for t in d["slack_user_tokens"]
+        ]
+        setattr(mod, "SLACK_USER_TOKENS", slack_tokens)
     if "teams_user_tokens" in d and isinstance(d["teams_user_tokens"], list):
-        setattr(mod, "TEAMS_USER_TOKENS", d["teams_user_tokens"])
+        import crypto as _crypto  # local import to avoid circular dependency
+        teams_tokens = [
+            {
+                **t,
+                "access_token":  _crypto.decrypt_secret(t["access_token"])  if "access_token"  in t else t.get("access_token",  ""),
+                "refresh_token": _crypto.decrypt_secret(t["refresh_token"]) if "refresh_token" in t else t.get("refresh_token", ""),
+            }
+            for t in d["teams_user_tokens"]
+        ]
+        setattr(mod, "TEAMS_USER_TOKENS", teams_tokens)
     if "slack_channels" in d:
         sc = d["slack_channels"] or ""
         setattr(mod, "SLACK_CHANNELS", [c.strip() for c in sc.split(",") if c.strip()])

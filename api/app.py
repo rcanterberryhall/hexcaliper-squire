@@ -52,6 +52,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import config
+import crypto
 import db
 from agent import extract_keywords, extract_emails, resolve_owner_email, generate_project_briefing
 from models import RawItem, Analysis
@@ -1983,6 +1984,13 @@ def get_stats():
     }
 
 
+# Warn at import time if OAuth tokens will be stored unencrypted.
+if not config.CREDENTIALS_KEY:
+    import logging as _log
+    _log.getLogger(__name__).warning(
+        "CREDENTIALS_KEY is not set — OAuth tokens will be stored unencrypted in SQLite."
+    )
+
 # ── OAuth state nonce store ────────────────────────────────────────────────────
 # Maps state token → expiry timestamp. Validated in each OAuth callback.
 _oauth_states: dict[str, float] = {}
@@ -2096,7 +2104,7 @@ def slack_callback(code: str = None, error: str = None, state: str = None):
     workspace = {
         "team":    team.get("name", "Unknown"),
         "team_id": team.get("id", ""),
-        "token":   token,
+        "token":   crypto.encrypt_secret(token),
     }
 
     with db.lock:
@@ -2241,8 +2249,8 @@ def teams_callback(code: str = None, error: str = None, error_description: str =
         "display_name":  display_name,
         "account_id":    account_id,
         "tenant":        tenant,
-        "access_token":  access_token,
-        "refresh_token": refresh_token or "",
+        "access_token":  crypto.encrypt_secret(access_token),
+        "refresh_token": crypto.encrypt_secret(refresh_token or ""),
     }
 
     with db.lock:

@@ -81,6 +81,7 @@ CF_CLIENT_SECRET = _get("CF_CLIENT_SECRET")
 
 SLACK_CLIENT_ID     = _get("SLACK_CLIENT_ID")
 SLACK_CLIENT_SECRET = _get("SLACK_CLIENT_SECRET")
+SLACK_REDIRECT_URI  = _get("SLACK_REDIRECT_URI", "https://parsival.hexcaliper.com/page/api/slack/callback")
 
 # Per-workspace user tokens stored after OAuth — populated at runtime via apply_overrides.
 SLACK_USER_TOKENS: list[dict] = []
@@ -94,6 +95,7 @@ SLACK_CHANNELS  = [c.strip() for c in _sc.split(",") if c.strip()] if _sc else [
 
 TEAMS_CLIENT_ID     = _get("TEAMS_CLIENT_ID")
 TEAMS_CLIENT_SECRET = _get("TEAMS_CLIENT_SECRET")
+TEAMS_REDIRECT_URI  = _get("TEAMS_REDIRECT_URI", "https://parsival.hexcaliper.com/page/api/teams/callback")
 
 # Per-account user tokens stored after OAuth — populated at runtime via apply_overrides.
 TEAMS_USER_TOKENS: list[dict] = []

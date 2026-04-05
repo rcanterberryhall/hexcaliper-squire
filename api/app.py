@@ -38,6 +38,8 @@ Module-level singletons:
     ``_seed_job``      — Single-slot state dict for the seed background job.
 """
 import json
+import secrets
+import time
 import threading
 import psutil as _psutil
 _psutil.cpu_percent()  # prime interval counter so first real call is accurate
@@ -1981,9 +1983,40 @@ def get_stats():
     }
 
 
+# ── OAuth state nonce store ────────────────────────────────────────────────────
+# Maps state token → expiry timestamp. Validated in each OAuth callback.
+_oauth_states: dict[str, float] = {}
+_OAUTH_STATE_TTL = 600  # 10 minutes
+
+
+def _new_oauth_state() -> str:
+    """Generate a cryptographically random state token and store it with a TTL."""
+    _clean_oauth_states()
+    token = secrets.token_urlsafe(32)
+    _oauth_states[token] = time.time() + _OAUTH_STATE_TTL
+    return token
+
+
+def _validate_oauth_state(state: str | None) -> bool:
+    """Return True if the state token is present and not expired, then remove it."""
+    _clean_oauth_states()
+    if not state or state not in _oauth_states:
+        return False
+    del _oauth_states[state]
+    return True
+
+
+def _clean_oauth_states() -> None:
+    """Remove expired state tokens."""
+    now = time.time()
+    expired = [k for k, exp in _oauth_states.items() if exp < now]
+    for k in expired:
+        del _oauth_states[k]
+
+
 # ── Slack OAuth ────────────────────────────────────────────────────────────────
 
-_SLACK_REDIRECT_URI  = "https://parsival.hexcaliper.com/page/api/slack/callback"
+_SLACK_REDIRECT_URI  = config.SLACK_REDIRECT_URI
 _SLACK_USER_SCOPES   = (
     "channels:history,channels:read,groups:history,groups:read,"
     "im:history,im:read,mpim:history,mpim:read,search:read,users:read"
@@ -2000,27 +2033,33 @@ def slack_connect():
     """
     if not config.SLACK_CLIENT_ID:
         raise HTTPException(status_code=400, detail="SLACK_CLIENT_ID not configured — save it in Settings first.")
+    state = _new_oauth_state()
     url = (
         f"https://slack.com/oauth/v2/authorize"
         f"?client_id={config.SLACK_CLIENT_ID}"
         f"&user_scope={_SLACK_USER_SCOPES}"
         f"&redirect_uri={_SLACK_REDIRECT_URI}"
+        f"&state={state}"
     )
     return Response(status_code=302, headers={"Location": url})
 
 
 @app.get("/slack/callback")
-def slack_callback(code: str = None, error: str = None):
+def slack_callback(code: str = None, error: str = None, state: str = None):
     """
     Handle the Slack OAuth2 redirect callback.
 
     :param code: Authorization code returned by Slack.
     :param error: Error identifier returned by Slack if the user denied access.
+    :param state: CSRF state nonce generated in ``/slack/connect``.
     :return: HTTP 302 redirect.
     :raises HTTPException 400: If no ``code`` is provided and no ``error`` is set.
+    :raises HTTPException 403: If the ``state`` parameter is missing or invalid.
     """
     if error:
         return Response(status_code=302, headers={"Location": f"/page/?slack_error={error}"})
+    if not _validate_oauth_state(state):
+        raise HTTPException(status_code=403, detail="Invalid or expired OAuth state — possible CSRF attempt.")
     if not code:
         raise HTTPException(status_code=400, detail="Missing OAuth code.")
 
@@ -2108,7 +2147,7 @@ def disconnect_slack_workspace(team_id: str):
 
 # ── Teams OAuth ────────────────────────────────────────────────────────────────
 
-_TEAMS_REDIRECT_URI = "https://parsival.hexcaliper.com/page/api/teams/callback"
+_TEAMS_REDIRECT_URI = config.TEAMS_REDIRECT_URI
 _TEAMS_SCOPES       = "Chat.Read ChannelMessage.Read.All Channel.ReadBasic.All offline_access"
 
 
@@ -2122,6 +2161,7 @@ def teams_connect():
     """
     if not config.TEAMS_CLIENT_ID:
         raise HTTPException(status_code=400, detail="TEAMS_CLIENT_ID not configured — save it in Settings first.")
+    state = _new_oauth_state()
     url = (
         "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
         f"?client_id={config.TEAMS_CLIENT_ID}"
@@ -2129,23 +2169,28 @@ def teams_connect():
         f"&redirect_uri={_TEAMS_REDIRECT_URI}"
         f"&scope={_TEAMS_SCOPES}"
         f"&response_mode=query"
+        f"&state={state}"
     )
     return Response(status_code=302, headers={"Location": url})
 
 
 @app.get("/teams/callback")
-def teams_callback(code: str = None, error: str = None, error_description: str = None):
+def teams_callback(code: str = None, error: str = None, error_description: str = None, state: str = None):
     """
     Handle the Microsoft Teams OAuth2 redirect callback.
 
     :param code: Authorization code returned by Microsoft.
     :param error: Error identifier returned if the user denied access.
     :param error_description: Human-readable error description.
+    :param state: CSRF state nonce generated in ``/teams/connect``.
     :return: HTTP 302 redirect.
     :raises HTTPException 400: If no ``code`` is provided and no ``error`` is set.
+    :raises HTTPException 403: If the ``state`` parameter is missing or invalid.
     """
     if error:
         return Response(status_code=302, headers={"Location": f"/page/?teams_error={error}"})
+    if not _validate_oauth_state(state):
+        raise HTTPException(status_code=403, detail="Invalid or expired OAuth state — possible CSRF attempt.")
     if not code:
         raise HTTPException(status_code=400, detail="Missing OAuth code.")
 

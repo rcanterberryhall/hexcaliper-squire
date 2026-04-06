@@ -565,6 +565,18 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .status-informational  { background: rgba(110,80,80,.1);    color: var(--muted); border: 1px solid var(--border); }
 .stat-situations { grid-column: 1 / -1; }
 .stat-intel      { grid-column: 1 / -1; }
+.sit-lc-sel { font-size:10px; padding:2px 4px; border-radius:var(--r); border:1px solid var(--border2); background:var(--surface); color:var(--text); cursor:pointer; }
+.lc-new          { border-color:var(--border2); }
+.lc-investigating { border-color:var(--blue);   color:var(--blue); }
+.lc-waiting      { border-color:var(--amber);  color:var(--amber); }
+.lc-resolved     { border-color:var(--green);  color:var(--green); }
+.lc-dismissed    { border-color:var(--muted);  color:var(--muted); }
+.sit-followup-input { font-size:10px; padding:2px 4px; border-radius:var(--r); border:1px solid var(--amber); background:var(--surface); color:var(--text); }
+.sit-notes-row { padding:4px 0 0; }
+.sit-notes-input { width:100%; font-size:11px; padding:3px 6px; border-radius:var(--r); border:1px solid var(--border2); background:var(--bg); color:var(--text); }
+.sit-notes-input:focus { outline:none; border-color:var(--accent); }
+.sit-overdue { box-shadow:0 0 0 1px var(--amber) inset; }
+.sit-overdue-icon { color:var(--amber); font-size:11px; margin-right:3px; }
 
 /* ── Briefing (Current State) ── */
 #intel-view { flex: 1; overflow-y: auto; padding: 12px 18px; display: none; position: relative; }
@@ -872,6 +884,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
         </div>
         <label class="show-done" id="showDoneLbl"><input type="checkbox" id="showDone" onchange="loadTodos()"> Show completed</label>
         <label class="show-done"><input type="checkbox" id="showHidden" onchange="onShowHidden()"> Show hidden</label>
+        <label class="show-done" id="showResolvedLbl" style="display:none"><input type="checkbox" id="showResolved" onchange="onShowResolved()"> Show resolved</label>
         <button class="ia" id="addActionBtn" onclick="toggleAddAction()" title="Add manual action item" style="margin-left:auto;padding:3px 9px;font-size:11px">+ Add action</button>
         <button class="ia" id="regenerateBriefingBtn" onclick="regenerateBriefing()" title="Re-generate briefing with current data" style="display:none;margin-left:auto;padding:3px 9px;font-size:11px">↺ Regenerate</button>
       </div>
@@ -1904,13 +1917,18 @@ function renderAssigned(todos) {
 
 async function loadSituations() {
   try {
-    const qs = showHidden ? '?include_dismissed=true' : '';
+    const params = new URLSearchParams();
+    if (showHidden)   params.set('include_dismissed', 'true');
+    if ($('showResolved')?.checked) params.set('include_resolved', 'true');
+    const qs = params.toString() ? '?' + params.toString() : '';
     allSituations = await api('/situations' + qs);
     renderSituations(allSituations);
     const el = $('st-situations');
-    if (el) el.textContent = allSituations.filter(s => !s.dismissed).length;
+    if (el) el.textContent = allSituations.filter(s => s.lifecycle_status !== 'dismissed').length;
   } catch(e) { console.warn('situations:', e); }
 }
+
+function onShowResolved() { loadSituations(); }
 
 function scoreClass(score) {
   if (score >= 1.8) return 'score-critical';
@@ -1927,7 +1945,7 @@ const srcColors = {
 function renderSituations(situations) {
   const el = $('situations-view');
   if (!el) return;
-  let visible = showHidden ? situations : situations.filter(s => !s.dismissed);
+  let visible = situations; // server already filtered by lifecycle_status
   if (projectFilter !== 'all') {
     visible = visible.filter(s =>
       projectFilter === '__none__' ? !s.project_tag : s.project_tag === projectFilter
@@ -1965,24 +1983,44 @@ function situationCard(s) {
       <span class="pri-${i.priority||'low'}" style="flex-shrink:0">${i.priority||'low'}</span>
     </div>`
   ).join('');
-  const sitActions = s.dismissed
+  const ls     = s.lifecycle_status || 'new';
+  const overdue = s.follow_up_overdue && ls === 'waiting';
+  const lsOpts  = ['new','investigating','waiting','resolved','dismissed'].map(v =>
+    `<option value="${v}"${ls===v?' selected':''}>${v}</option>`
+  ).join('');
+  const lcDropdown = `<select class="sit-lc-sel lc-${ls}" onclick="event.stopPropagation()"
+    onchange="event.stopPropagation();setSituationLifecycle('${esc(s.situation_id)}',this.value)">${lsOpts}</select>`;
+  const followUpField = ls === 'waiting'
+    ? `<input type="date" class="sit-followup-input" value="${s.follow_up_date||''}"
+         title="Follow-up date" onclick="event.stopPropagation()"
+         onchange="event.stopPropagation();setSituationFollowUp('${esc(s.situation_id)}',this.value)">`
+    : '';
+  const overdueIcon  = overdue ? `<span class="sit-overdue-icon" title="Follow-up overdue">⚠</span>` : '';
+  const notesVal = (s.notes || '').replace(/"/g, '&quot;');
+  const notesField = `<div class="sit-notes-row" onclick="event.stopPropagation()">
+    <input type="text" class="sit-notes-input" placeholder="Notes…" value="${notesVal}"
+      onchange="event.stopPropagation();setSituationNotes('${esc(s.situation_id)}',this.value)">
+  </div>`;
+
+  const sitActions = ls === 'dismissed'
     ? `<button class="restore-btn" onclick="event.stopPropagation();restoreSituation('${esc(s.situation_id)}')" title="Restore">↩ restore</button>`
-    : `<button class="sit-dismiss" onclick="event.stopPropagation();dismissSituation('${esc(s.situation_id)}')" title="Dismiss">✕</button>
-       <button class="ia" onclick="event.stopPropagation();resynthSituation('${esc(s.situation_id)}')" title="Re-synthesize">↺</button>
+    : `<button class="ia" onclick="event.stopPropagation();resynthSituation('${esc(s.situation_id)}')" title="Re-synthesize">↺</button>
        <button class="ia deep-analysis-btn" id="da-btn-${esc(s.situation_id)}" onclick="event.stopPropagation();requestDeepAnalysis('${esc(s.situation_id)}')" title="Submit for extended-context deep analysis in merLLM night mode">⚗</button>`;
   return `
-    <div class="situation-card ${sc}${s.dismissed ? ' row-hidden' : ''}" id="sit-${esc(s.situation_id)}">
+    <div class="situation-card ${sc}${ls==='dismissed'?' row-hidden':''}${overdue?' sit-overdue':''}" id="sit-${esc(s.situation_id)}">
       <div class="sit-header" onclick="toggleSituationEvidence('${esc(s.situation_id)}')">
-        <div class="sit-score">${score}</div>
+        <div class="sit-score">${overdueIcon}${score}</div>
         <div class="sit-main">
           <div class="sit-title">${esc(s.title)}</div>
           <div class="sit-summary">${esc(s.summary)}</div>
           <div class="sit-meta">
             <div class="sit-src-dots">${srcDots}</div>
             ${priLabel}${projLabel}${statusLabel}
+            ${lcDropdown}${followUpField}
             <span style="font-size:10px;color:var(--muted)">${s.item_count} item${s.item_count!==1?'s':''}</span>
             ${actLine}
           </div>
+          ${notesField}
         </div>
         <div class="sit-actions">${sitActions}</div>
       </div>
@@ -1999,26 +2037,58 @@ function toggleSituationEvidence(sitId) {
 
 async function dismissSituation(sitId) {
   try {
-    await api(`/situations/${encodeURIComponent(sitId)}/dismiss`, 'POST');
+    await api(`/situations/${encodeURIComponent(sitId)}/transition`, 'POST', {to_status: 'dismissed'});
     allSituations = allSituations.map(s =>
-      s.situation_id === sitId ? {...s, dismissed: true} : s
+      s.situation_id === sitId ? {...s, dismissed: true, lifecycle_status: 'dismissed'} : s
     );
     renderSituations(allSituations);
     const el = $('st-situations');
-    if (el) el.textContent = allSituations.filter(s => !s.dismissed).length;
+    if (el) el.textContent = allSituations.filter(s => s.lifecycle_status !== 'dismissed').length;
   } catch(e) { $('statusMsg').textContent = 'Dismiss failed: ' + e.message; }
 }
 
 async function restoreSituation(sitId) {
   try {
-    await api(`/situations/${encodeURIComponent(sitId)}/undismiss`, 'POST');
+    await api(`/situations/${encodeURIComponent(sitId)}/transition`, 'POST', {to_status: 'new'});
     allSituations = allSituations.map(s =>
-      s.situation_id === sitId ? {...s, dismissed: false} : s
+      s.situation_id === sitId ? {...s, dismissed: false, lifecycle_status: 'new'} : s
     );
     renderSituations(allSituations);
     const el = $('st-situations');
-    if (el) el.textContent = allSituations.filter(s => !s.dismissed).length;
+    if (el) el.textContent = allSituations.filter(s => s.lifecycle_status !== 'dismissed').length;
   } catch(e) { $('statusMsg').textContent = 'Restore failed: ' + e.message; }
+}
+
+async function setSituationLifecycle(sitId, toStatus) {
+  try {
+    await api(`/situations/${encodeURIComponent(sitId)}/transition`, 'POST', {to_status: toStatus});
+    allSituations = allSituations.map(s =>
+      s.situation_id === sitId
+        ? {...s, lifecycle_status: toStatus, dismissed: toStatus === 'dismissed'}
+        : s
+    );
+    renderSituations(allSituations);
+    const el = $('st-situations');
+    if (el) el.textContent = allSituations.filter(s => s.lifecycle_status !== 'dismissed').length;
+  } catch(e) { $('statusMsg').textContent = 'Status update failed: ' + e.message; }
+}
+
+async function setSituationFollowUp(sitId, date) {
+  try {
+    await api(`/situations/${encodeURIComponent(sitId)}`, 'PATCH', {follow_up_date: date || null});
+    allSituations = allSituations.map(s =>
+      s.situation_id === sitId ? {...s, follow_up_date: date || null} : s
+    );
+  } catch(e) { $('statusMsg').textContent = 'Follow-up update failed: ' + e.message; }
+}
+
+async function setSituationNotes(sitId, notes) {
+  try {
+    await api(`/situations/${encodeURIComponent(sitId)}`, 'PATCH', {notes});
+    allSituations = allSituations.map(s =>
+      s.situation_id === sitId ? {...s, notes} : s
+    );
+  } catch(e) { $('statusMsg').textContent = 'Notes update failed: ' + e.message; }
 }
 
 async function resynthSituation(sitId) {
@@ -2190,10 +2260,12 @@ function openItemDetail(itemId) {
 
 function _updateToolbarForView(v) {
   const showDoneLbl      = $('showDoneLbl');
+  const showResolvedLbl  = $('showResolvedLbl');
   const scoreOpt         = $('sortOptScore');
   const addActionBtn     = $('addActionBtn');
   const regenBriefingBtn = $('regenerateBriefingBtn');
   if (showDoneLbl)      showDoneLbl.style.display      = v === 'todos' ? '' : 'none';
+  if (showResolvedLbl)  showResolvedLbl.style.display  = v === 'situations' ? '' : 'none';
   if (scoreOpt)         scoreOpt.style.display         = v === 'situations' ? '' : 'none';
   if (addActionBtn)     addActionBtn.style.display     = v === 'intel' ? 'none' : '';
   if (regenBriefingBtn) regenBriefingBtn.style.display = v === 'intel' ? '' : 'none';

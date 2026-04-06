@@ -355,6 +355,9 @@ class _SituationsProxy:
         d = dict(data)
         if "dismissed" in d and isinstance(d["dismissed"], bool):
             d["dismissed"] = 1 if d["dismissed"] else 0
+        # Keep lifecycle_status in sync with dismissed flag
+        if "lifecycle_status" not in d:
+            d["lifecycle_status"] = "dismissed" if d.get("dismissed") else "new"
         with db.lock:
             db.insert_situation(d)
 
@@ -1703,25 +1706,41 @@ def get_analyses(
     return [_deserialize_analysis(dict(a)) for a in results[:limit]]
 
 
+_ACTIVE_LIFECYCLE = {"new", "investigating", "waiting"}
+_ALL_LIFECYCLE    = {"new", "investigating", "waiting", "resolved", "dismissed"}
+
+
 @app.get("/situations")
 def get_situations(
-    project:            Optional[str] = None,
-    status:             Optional[str] = None,
-    min_score:          float         = 0.0,
-    include_dismissed:  bool          = False,
+    project:             Optional[str] = None,
+    status:              Optional[str] = None,
+    lifecycle_status:    Optional[str] = None,
+    min_score:           float         = 0.0,
+    include_dismissed:   bool          = False,
+    include_resolved:    bool          = False,
 ):
     """
-    Return situations, optionally filtered and sorted by score descending.
+    Return situations, filtered and sorted by score descending.
 
-    :param project: Filter to situations tagged to a specific project.
-    :param status: Filter by status.
-    :param min_score: Minimum composite urgency score.
-    :param include_dismissed: When ``True``, dismissed situations are included.
-    :return: List of situation response dicts sorted by score descending.
-    :rtype: list[dict]
+    Default view: ``new``, ``investigating``, and ``waiting`` situations.
+    Pass ``include_resolved=true`` to also show ``resolved``.
+    Pass ``include_dismissed=true`` to also show ``dismissed``.
+    Pass ``lifecycle_status=<value>`` to filter to an exact lifecycle status.
     """
     with db.lock:
-        all_sits = db.get_all_situations(include_dismissed=include_dismissed)
+        all_sits = db.get_all_situations(include_dismissed=True)
+
+    # Lifecycle filter
+    if lifecycle_status:
+        all_sits = [s for s in all_sits if s.get("lifecycle_status") == lifecycle_status]
+    else:
+        allowed = set(_ACTIVE_LIFECYCLE)
+        if include_resolved:
+            allowed.add("resolved")
+        if include_dismissed:
+            allowed.add("dismissed")
+        all_sits = [s for s in all_sits if s.get("lifecycle_status", "new") in allowed]
+
     if project:
         all_sits = [s for s in all_sits if s.get("project_tag") == project]
     if status:
@@ -1765,12 +1784,16 @@ def dismiss_situation(situation_id: str, body: dict = {}):
     :raises HTTPException 404: If no situation with the given ID exists.
     """
     with db.lock:
-        if not db.get_situation(situation_id):
+        sit = db.get_situation(situation_id)
+        if not sit:
             raise HTTPException(status_code=404, detail="Situation not found")
+        prev = sit.get("lifecycle_status", "new")
         db.update_situation(
             situation_id,
-            {"dismissed": 1, "dismiss_reason": body.get("reason")},
+            {"dismissed": 1, "dismiss_reason": body.get("reason"),
+             "lifecycle_status": "dismissed"},
         )
+        db.insert_situation_event(situation_id, prev, "dismissed", body.get("reason"))
     return {"ok": True}
 
 
@@ -1784,12 +1807,14 @@ def undismiss_situation(situation_id: str):
     :raises HTTPException 404: If no situation with the given ID exists.
     """
     with db.lock:
-        if not db.get_situation(situation_id):
+        sit = db.get_situation(situation_id)
+        if not sit:
             raise HTTPException(status_code=404, detail="Situation not found")
         db.update_situation(
             situation_id,
-            {"dismissed": 0, "dismiss_reason": None},
+            {"dismissed": 0, "dismiss_reason": None, "lifecycle_status": "new"},
         )
+        db.insert_situation_event(situation_id, "dismissed", "new", "restored")
     return {"ok": True}
 
 
@@ -1826,15 +1851,82 @@ def patch_situation(situation_id: str, body: dict):
     :raises HTTPException 400: If no valid fields are present in ``body``.
     :raises HTTPException 404: If no situation with the given ID exists.
     """
-    allowed = {"title", "status", "project_tag"}
+    allowed = {"title", "status", "project_tag", "lifecycle_status", "follow_up_date", "notes"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         raise HTTPException(status_code=400, detail="No valid fields to update.")
+
+    if "lifecycle_status" in updates and updates["lifecycle_status"] not in _ALL_LIFECYCLE:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid lifecycle_status. Valid values: {sorted(_ALL_LIFECYCLE)}",
+        )
+
+    with db.lock:
+        sit = db.get_situation(situation_id)
+        if not sit:
+            raise HTTPException(status_code=404, detail="Situation not found")
+        if "lifecycle_status" in updates:
+            prev = sit.get("lifecycle_status", "new")
+            # Keep dismissed flag in sync
+            if updates["lifecycle_status"] == "dismissed":
+                updates["dismissed"] = 1
+            elif sit.get("dismissed"):
+                updates["dismissed"] = 0
+            db.insert_situation_event(situation_id, prev, updates["lifecycle_status"])
+        db.update_situation(situation_id, updates)
+    return {"ok": True, **updates}
+
+
+@app.post("/situations/{situation_id}/transition")
+def transition_situation(situation_id: str, body: dict):
+    """
+    Transition a situation to a new lifecycle status and log the event.
+
+    :param body: ``{"to_status": "<status>", "note": "<optional note>",
+                    "follow_up_date": "<optional ISO date>"}``
+    :return: ``{"ok": True, "lifecycle_status": "<new status>"}``
+    :raises HTTPException 404: If no situation exists.
+    :raises HTTPException 422: If ``to_status`` is invalid.
+    """
+    to_status = body.get("to_status")
+    if not to_status or to_status not in _ALL_LIFECYCLE:
+        raise HTTPException(
+            status_code=422,
+            detail=f"to_status required. Valid values: {sorted(_ALL_LIFECYCLE)}",
+        )
+    with db.lock:
+        sit = db.get_situation(situation_id)
+        if not sit:
+            raise HTTPException(status_code=404, detail="Situation not found")
+        prev    = sit.get("lifecycle_status", "new")
+        updates = {"lifecycle_status": to_status}
+        if to_status == "dismissed":
+            updates["dismissed"] = 1
+        elif sit.get("dismissed"):
+            updates["dismissed"] = 0
+        if "follow_up_date" in body:
+            updates["follow_up_date"] = body["follow_up_date"]
+        db.update_situation(situation_id, updates)
+        db.insert_situation_event(situation_id, prev, to_status, body.get("note"))
+    return {"ok": True, "lifecycle_status": to_status}
+
+
+@app.get("/situations/{situation_id}/events")
+def get_situation_events(situation_id: str):
+    """
+    Return the lifecycle event history for a situation, oldest first.
+
+    :param situation_id: UUID of the situation.
+    :return: List of event dicts with ``from_status``, ``to_status``,
+             ``timestamp``, and ``note``.
+    :raises HTTPException 404: If no situation exists.
+    """
     with db.lock:
         if not db.get_situation(situation_id):
             raise HTTPException(status_code=404, detail="Situation not found")
-        db.update_situation(situation_id, updates)
-    return {"ok": True, **updates}
+        events = db.get_situation_events(situation_id)
+    return events
 
 
 @app.post("/situations/{situation_id}/deep-analysis")

@@ -355,11 +355,13 @@ def _maybe_form_situation(item_id: str) -> None:
             "priority":         max_pri.get("priority", "medium"),
             "open_actions":     synthesis.get("open_actions", []),
             "references":       all_refs,
-            "key_context":      synthesis.get("key_context"),
-            "last_updated":     last_ts,
-            "created_at":       now_iso(),
-            "score_updated_at": now_iso(),
-            "dismissed":        False,
+            "key_context":        synthesis.get("key_context"),
+            "last_updated":       last_ts,
+            "created_at":         now_iso(),
+            "score_updated_at":   now_iso(),
+            "dismissed":          False,
+            "lifecycle_status":   "new",
+            "notes":              "",
         }
         with db.lock:
             db.insert_situation(sit_doc)
@@ -424,21 +426,35 @@ def _situation_response(sit: dict) -> dict:
         }
         for r in items_raw if r
     ]
+    from datetime import datetime, timezone
+    follow_up_date   = sit.get("follow_up_date")
+    follow_up_overdue = False
+    if follow_up_date:
+        try:
+            fud = datetime.fromisoformat(follow_up_date.rstrip("Z"))
+            follow_up_overdue = fud < datetime.now(timezone.utc).replace(tzinfo=None)
+        except Exception:
+            pass
+
     return {
-        "situation_id": sit.get("situation_id"),
-        "title":        sit.get("title"),
-        "summary":      sit.get("summary"),
-        "status":       sit.get("status"),
-        "score":        sit.get("score", 0.0),
-        "priority":     sit.get("priority"),
-        "sources":      sit.get("sources", []),
-        "project_tag":  sit.get("project_tag"),
-        "open_actions": sit.get("open_actions", []),
-        "references":   sit.get("references", []),
-        "key_context":  sit.get("key_context"),
-        "last_updated": sit.get("last_updated"),
-        "created_at":   sit.get("created_at"),
-        "dismissed":    sit.get("dismissed", False),
-        "item_count":   len(items),
-        "items":        items,
+        "situation_id":    sit.get("situation_id"),
+        "title":           sit.get("title"),
+        "summary":         sit.get("summary"),
+        "status":          sit.get("status"),
+        "lifecycle_status": sit.get("lifecycle_status", "new"),
+        "score":           sit.get("score", 0.0),
+        "priority":        sit.get("priority"),
+        "sources":         sit.get("sources", []),
+        "project_tag":     sit.get("project_tag"),
+        "open_actions":    sit.get("open_actions", []),
+        "references":      sit.get("references", []),
+        "key_context":     sit.get("key_context"),
+        "last_updated":    sit.get("last_updated"),
+        "created_at":      sit.get("created_at"),
+        "dismissed":       sit.get("dismissed", False),
+        "follow_up_date":  follow_up_date,
+        "follow_up_overdue": follow_up_overdue,
+        "notes":           sit.get("notes", ""),
+        "item_count":      len(items),
+        "items":           items,
     }

@@ -76,6 +76,27 @@ def _migrate_schema(c: sqlite3.Connection) -> None:
     if "batch_job_id" not in cols:
         c.execute("ALTER TABLE items ADD COLUMN batch_job_id TEXT")
 
+    sit_cols = {row[1] for row in c.execute("PRAGMA table_info(situations)").fetchall()}
+    if "lifecycle_status" not in sit_cols:
+        c.execute("ALTER TABLE situations ADD COLUMN lifecycle_status TEXT NOT NULL DEFAULT 'new'")
+        # Migrate dismissed=1 rows to lifecycle_status='dismissed'
+        c.execute("UPDATE situations SET lifecycle_status='dismissed' WHERE dismissed=1")
+    if "follow_up_date" not in sit_cols:
+        c.execute("ALTER TABLE situations ADD COLUMN follow_up_date TEXT")
+    if "notes" not in sit_cols:
+        c.execute("ALTER TABLE situations ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS situation_events (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            situation_id TEXT    NOT NULL,
+            from_status  TEXT,
+            to_status    TEXT    NOT NULL,
+            timestamp    TEXT    NOT NULL,
+            note         TEXT
+        )
+    """)
+
 
 def _create_schema(c: sqlite3.Connection) -> None:
     """Create all tables and indexes if they do not already exist."""
@@ -611,6 +632,44 @@ def get_situations_containing_item(item_id: str) -> list[dict]:
     # item_ids stored as JSON array; filter in Python after fetching all
     return [s for s in get_all_situations(include_dismissed=True)
             if item_id in s.get("item_ids", [])]
+
+
+def get_active_situations(lifecycle_statuses: list[str] | None = None) -> list[dict]:
+    """
+    Return situations filtered by lifecycle_status.
+
+    If ``lifecycle_statuses`` is None, defaults to active statuses:
+    ``new``, ``investigating``, ``waiting``.
+    """
+    if lifecycle_statuses is None:
+        lifecycle_statuses = ["new", "investigating", "waiting"]
+    placeholders = ", ".join("?" * len(lifecycle_statuses))
+    rows = conn().execute(
+        f"SELECT * FROM situations WHERE lifecycle_status IN ({placeholders})",
+        lifecycle_statuses,
+    ).fetchall()
+    return [_parse_situation(_row_to_dict(r)) for r in rows]
+
+
+def insert_situation_event(situation_id: str, from_status: str | None,
+                           to_status: str, note: str | None = None) -> None:
+    """Log a lifecycle status transition event."""
+    from datetime import datetime, timezone
+    ts = datetime.now(timezone.utc).isoformat()
+    conn().execute(
+        "INSERT INTO situation_events (situation_id, from_status, to_status, timestamp, note) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (situation_id, from_status, to_status, ts, note),
+    )
+
+
+def get_situation_events(situation_id: str) -> list[dict]:
+    """Return all lifecycle events for a situation, oldest first."""
+    rows = conn().execute(
+        "SELECT * FROM situation_events WHERE situation_id=? ORDER BY id ASC",
+        (situation_id,),
+    ).fetchall()
+    return [_row_to_dict(r) for r in rows]
 
 
 # ── Settings operations ────────────────────────────────────────────────────────

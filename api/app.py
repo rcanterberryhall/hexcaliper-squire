@@ -63,6 +63,7 @@ import correlator as _correlator
 import situation_manager
 import orchestrator
 import seeder
+import attention as _attn
 
 app = FastAPI(title="Parsival API", version="1.0.0")
 
@@ -915,6 +916,10 @@ def patch_analysis(item_id: str, body: dict, background_tasks: BackgroundTasks):
                 print(f"[patch] embedding update failed: {e}")
         background_tasks.add_task(relearn)
 
+    # Record attention signal for project tagging
+    if "project_tag" in updates and updates["project_tag"]:
+        _attn.record_action(item_id, "tagged")
+
     return {"ok": True, **updates}
 
 
@@ -1084,6 +1089,7 @@ def mark_noise(item_id: str, background_tasks: BackgroundTasks):
         db.delete_todos_for_item(item_id)
 
     background_tasks.add_task(_learn_keywords_for_category, record, "noise")
+    _attn.record_action(item_id, "noised")
 
     # Build filter suggestions based on the item's fields
     suggestions = []
@@ -1104,6 +1110,31 @@ def mark_noise(item_id: str, background_tasks: BackgroundTasks):
             suggestions.append({"type": "source_repo", "value": repo})
 
     return {"ok": True, "filter_suggestions": suggestions}
+
+
+@app.post("/analyses/{item_id}/action")
+def record_item_action(item_id: str, body: dict):
+    """
+    Record a user interaction for attention model training.
+
+    :param body: ``{"action_type": "opened"}``  (or tagged, noised, etc.)
+    :return: ``{"ok": True}``
+    """
+    action_type = body.get("action_type", "")
+    if not action_type:
+        raise HTTPException(status_code=422, detail="action_type required")
+    _attn.record_action(item_id, action_type)
+    return {"ok": True}
+
+
+@app.get("/attention/summary")
+def attention_summary():
+    """
+    Return the attention model summary for the merLLM 'My Day' panel.
+
+    Includes cold-start flag, centroid counts, and a message for UI display.
+    """
+    return _attn.get_summary()
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
@@ -1787,7 +1818,25 @@ def get_analyses(
         results = [a for a in results if (a.get("timestamp") or "") <= to_date]
 
     results.sort(key=lambda a: a.get("timestamp", ""), reverse=True)
-    return [_deserialize_analysis(dict(a)) for a in results[:limit]]
+    sliced = results[:limit]
+
+    # Attach attention scores (fast path — reads stored vectors; 0.5 on cold start)
+    cold = _attn.is_cold_start()
+    out  = []
+    for a in sliced:
+        rec = _deserialize_analysis(dict(a))
+        if cold:
+            rec["attention_score"] = 0.5
+        else:
+            try:
+                from embedder import get_item_vector
+                vec   = get_item_vector(a.get("item_id", ""))
+                score = _attn.compute_score(vec or [])
+            except Exception:
+                score = 0.5
+            rec["attention_score"] = round(score, 4)
+        out.append(rec)
+    return out
 
 
 _ACTIVE_LIFECYCLE = {"new", "investigating", "waiting"}
@@ -1993,6 +2042,15 @@ def transition_situation(situation_id: str, body: dict):
             updates["follow_up_date"] = body["follow_up_date"]
         db.update_situation(situation_id, updates)
         db.insert_situation_event(situation_id, prev, to_status, body.get("note"))
+        item_ids = sit.get("item_ids", [])
+
+    # Record attention signals for all items in this situation
+    action = "investigated_situation" if to_status == "investigating" else \
+             "dismissed_situation"     if to_status == "dismissed"    else None
+    if action and item_ids:
+        for iid in item_ids:
+            _attn.record_action(iid, action)
+
     return {"ok": True, "lifecycle_status": to_status}
 
 
@@ -2064,6 +2122,10 @@ def submit_deep_analysis(situation_id: str):
         job_id = r.json().get("id")
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"merLLM unreachable: {exc}")
+
+    # Record attention signals
+    for iid in item_ids:
+        _attn.record_action(iid, "deep_analysis")
 
     return {"ok": True, "job_id": job_id}
 

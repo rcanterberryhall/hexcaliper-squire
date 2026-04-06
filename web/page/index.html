@@ -565,6 +565,10 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .status-informational  { background: rgba(110,80,80,.1);    color: var(--muted); border: 1px solid var(--border); }
 .stat-situations { grid-column: 1 / -1; }
 .stat-intel      { grid-column: 1 / -1; }
+.attention-cold-banner { font-size:11px; color:var(--muted); background:rgba(110,80,80,.08); border:1px solid var(--border); border-radius:var(--r); padding:6px 12px; margin-bottom:10px; }
+tr.attn-high td { border-left:2px solid var(--accent); }
+tr.attn-high .t-title { font-weight:600; color:var(--text); }
+tr.attn-low  { opacity:0.65; }
 .noise-filter-row { display:flex; align-items:center; gap:8px; padding:4px 6px; border-radius:var(--r); background:var(--surface); margin-bottom:4px; }
 .sit-lc-sel { font-size:10px; padding:2px 4px; border-radius:var(--r); border:1px solid var(--border2); background:var(--surface); color:var(--text); cursor:pointer; }
 .lc-new          { border-color:var(--border2); }
@@ -877,6 +881,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
             <option value="90">90 days</option>
           </select>
           <select class="detail-select" id="sortSel" onchange="onSortChange(this.value)" title="Sort order">
+            <option value="attention" id="sortOptAttention">Attention ↓</option>
             <option value="priority">Priority ↓</option>
             <option value="newest">Newest first</option>
             <option value="oldest">Oldest first</option>
@@ -1234,7 +1239,8 @@ let hierarchyFilter = 'all';
 let projectFilter   = 'all';
 let currentView     = 'todos';
 let showHidden      = false;
-let sortBy          = 'priority';
+let sortBy          = 'attention';
+let _attentionColdStart = true;
 const _priRank      = p => ({high:0,medium:1,low:2}[p] ?? 1);
 let searchQuery     = '';
 let dateFilter      = 'all';
@@ -1704,6 +1710,28 @@ async function deleteTodo(id) {
 async function loadItems() {
   try {
     allAnalyses = await api('/analyses');
+    // Check attention model cold start
+    api('/attention/summary').then(s => {
+      _attentionColdStart = s.cold_start;
+      const msg = s.cold_start_msg;
+      if (msg) {
+        const existing = $('attention-cold-msg');
+        if (!existing) {
+          const banner = document.createElement('div');
+          banner.id        = 'attention-cold-msg';
+          banner.className = 'attention-cold-banner';
+          banner.textContent = msg;
+          const view = $('items-view');
+          if (view) view.insertAdjacentElement('afterbegin', banner);
+        }
+      } else {
+        const b = $('attention-cold-msg');
+        if (b) b.remove();
+      }
+      // Hide attention sort option during cold start
+      const opt = $('sortOptAttention');
+      if (opt) opt.textContent = s.cold_start ? 'Attention ↓ (learning…)' : 'Attention ↓';
+    }).catch(() => {});
     updateTypeCounts(allAnalyses);
     renderItems(allAnalyses);
     renderSidebarProjects(allAnalyses);
@@ -1817,7 +1845,12 @@ function itemRow(i) {
     }
   </td>`;
   const replied = i.is_replied ? `<span title="Replied" style="color:var(--blue);font-size:10px;margin-left:4px">↩</span>` : '';
-  return `<tr class="${isNoise ? 'row-hidden' : ''}" onclick="openItemDetail('${esc(i.item_id)}')">
+  const attnScore  = i.attention_score ?? 0.5;
+  const attnClass  = !_attentionColdStart && attnScore >= 0.75 ? ' attn-high' :
+                     !_attentionColdStart && attnScore <= 0.25 ? ' attn-low' : '';
+  const whyTip     = !_attentionColdStart && attnScore !== 0.5
+    ? ` title="Attention: ${attnScore.toFixed(2)}"` : '';
+  return `<tr class="${isNoise ? 'row-hidden' : ''}${attnClass}" onclick="openItemDetail('${esc(i.item_id)}')"${whyTip}>
     <td><span class="badge b-${i.source}">${i.source}</span>${pd}${replied}</td>
     <td><span class="badge b-${catKey}">${catLabel}</span></td>
     <td class="t-title">${esc(i.title || '')}${proj}</td>
@@ -2326,8 +2359,9 @@ function onSortChange(val) {
 
 function _applySortAnalyses(arr) {
   const a = arr.slice();
-  if (sortBy === 'newest')   return a.sort((x,y) => (y.timestamp||'').localeCompare(x.timestamp||''));
-  if (sortBy === 'oldest')   return a.sort((x,y) => (x.timestamp||'').localeCompare(y.timestamp||''));
+  if (sortBy === 'newest')    return a.sort((x,y) => (y.timestamp||'').localeCompare(x.timestamp||''));
+  if (sortBy === 'oldest')    return a.sort((x,y) => (x.timestamp||'').localeCompare(y.timestamp||''));
+  if (sortBy === 'attention') return a.sort((x,y) => (y.attention_score||0) - (x.attention_score||0) || _priRank(x.priority) - _priRank(y.priority));
   // priority (default): high→medium→low, then newest within each
   return a.sort((x,y) => _priRank(x.priority) - _priRank(y.priority) || (y.timestamp||'').localeCompare(x.timestamp||''));
 }
@@ -2409,6 +2443,12 @@ function detailRow(label, value) {
 function openDetail(item) {
   if (!item) return;
   $('detailTitle').textContent = item.title || '(no title)';
+
+  // Record opened action for attention model (fire-and-forget)
+  if (!_attentionColdStart) {
+    api(`/analyses/${encodeURIComponent(item.item_id)}/action`, 'POST',
+        {action_type: 'opened'}).catch(() => {});
+  }
 
   const badges = [
     `<span class="badge b-${item.source}">${item.source}</span>`,

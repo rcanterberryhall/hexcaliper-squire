@@ -97,6 +97,22 @@ def _migrate_schema(c: sqlite3.Connection) -> None:
         )
     """)
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_actions (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id     TEXT    NOT NULL,
+            action_type TEXT    NOT NULL,
+            timestamp   TEXT    NOT NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS model_state (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT '{}'
+        )
+    """)
+
 
 def _create_schema(c: sqlite3.Connection) -> None:
     """Create all tables and indexes if they do not already exist."""
@@ -670,6 +686,56 @@ def get_situation_events(situation_id: str) -> list[dict]:
         (situation_id,),
     ).fetchall()
     return [_row_to_dict(r) for r in rows]
+
+
+# ── User actions (attention model) ────────────────────────────────────────────
+
+def record_user_action(item_id: str, action_type: str) -> None:
+    """Log a user interaction with an item for attention model training."""
+    ts = _now_iso()
+    conn().execute(
+        "INSERT INTO user_actions (item_id, action_type, timestamp) VALUES (?,?,?)",
+        (item_id, action_type, ts),
+    )
+
+
+def get_user_actions(since_iso: str | None = None) -> list[dict]:
+    """Return user actions, optionally filtered to those after *since_iso*."""
+    if since_iso:
+        rows = conn().execute(
+            "SELECT * FROM user_actions WHERE timestamp >= ? ORDER BY id ASC",
+            (since_iso,),
+        ).fetchall()
+    else:
+        rows = conn().execute("SELECT * FROM user_actions ORDER BY id ASC").fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def count_user_actions() -> int:
+    """Return total number of recorded user actions."""
+    return conn().execute("SELECT COUNT(*) FROM user_actions").fetchone()[0]
+
+
+# ── Model state (attention centroids) ─────────────────────────────────────────
+
+def get_model_state(key: str) -> Optional[dict]:
+    """Return a deserialized model state value, or None."""
+    row = conn().execute("SELECT value FROM model_state WHERE key=?", (key,)).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row[0])
+    except Exception:
+        return None
+
+
+def set_model_state(key: str, value: dict) -> None:
+    """Upsert a model state value (serialized as JSON)."""
+    conn().execute(
+        "INSERT INTO model_state (key, value) VALUES (?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, json.dumps(value)),
+    )
 
 
 # ── Settings operations ────────────────────────────────────────────────────────

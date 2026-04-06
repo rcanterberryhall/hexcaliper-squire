@@ -434,6 +434,30 @@ docker compose up -d
 
 Alternatively, use `POST /reset` to clear analyses, todos, and scan logs while keeping your saved settings.
 
+### Database backup
+
+Back up `squire.db` while the container is running using the SQLite CLI's
+online backup command (safe with WAL mode):
+
+```bash
+sqlite3 data/squire.db ".backup 'backups/squire-$(date +%Y%m%d-%H%M%S).db'"
+```
+
+**Scheduled backup via cron (run on the host):**
+
+```bash
+# Back up every night at 03:00
+0 3 * * * sqlite3 /opt/hexcaliper-squire/data/squire.db \
+  ".backup '/opt/hexcaliper-squire/backups/squire-$(date +%Y%m%d-%H%M%S).db'" \
+  >> /var/log/squire-backup.log 2>&1
+```
+
+Or with the helper script (if present):
+
+```bash
+0 3 * * * /opt/hexcaliper-squire/backup_db.sh >> /var/log/squire-backup.log 2>&1
+```
+
 ### Migrating from an older TinyDB installation
 
 If you have an existing `data/page.db` from a TinyDB-based deployment, run the one-time migration script before starting the new container:

@@ -67,10 +67,11 @@ Email sources (Outlook and Thunderbird) cannot run inside Docker because they re
 | `correlator.py` | Heuristic item-to-situation matching (project, topic, author overlap) |
 | `seeder.py` | Seed state machine (ingest → LLM proposal → review → apply → reanalyze) |
 | `models.py` | Pydantic models: `RawItem`, `Analysis`, `ActionItem` |
-| `config.py` | Environment variable loading and hot-reload helpers |
+| `llm.py` | LLM provider abstraction — routes all inference calls through Ollama (local), Ollama Cloud, or Claude API based on `ESCALATION_PROVIDER` config |
+| `config.py` | Environment variable loading, hot-reload helpers, escalation provider config (`ESCALATION_PROVIDER`, `ESCALATION_MODEL`, `ESCALATION_API_KEY`, `ESCALATION_API_URL`) |
 | `connector_*.py` | Source-specific fetch logic (one per connector); GitHub connector follows `Link` header pagination |
 
-`app.py` is the HTTP boundary — it owns all FastAPI route definitions and delegates all heavy work outward. `orchestrator.py` owns the analysis pipeline and is the only module that calls `agent.py` for LLM inference. `db.py` is the only module that touches SQLite directly; all other modules call its helper functions rather than writing SQL themselves. This separation means the storage layer can be tested or replaced without touching business logic.
+`app.py` is the HTTP boundary — it owns all FastAPI route definitions and delegates all heavy work outward. `orchestrator.py` owns the analysis pipeline and is the only module that calls `agent.py` for LLM inference. `llm.py` is the single point of contact for all LLM calls — `agent.py`, `correlator.py`, and `seeder.py` all call `llm.generate()` rather than making HTTP requests directly. This allows the LLM backend to be switched between local Ollama, Ollama Cloud, and the Claude API via config without touching any caller code. `db.py` is the only module that touches SQLite directly; all other modules call its helper functions rather than writing SQL themselves. This separation means both the storage layer and the inference layer can be tested or replaced without touching business logic.
 
 ---
 
@@ -85,6 +86,7 @@ sequenceDiagram
     participant Orch as orchestrator.py
     participant Conn as connector_*.py
     participant Agent as agent.py
+    participant LLM as llm.py
     participant Graph as graph.py
     participant Sit as situation_manager.py
     participant DB as db.py
@@ -102,8 +104,8 @@ sequenceDiagram
         Orch->>Agent: analyze(item)
         Agent->>Graph: get_context(item) [GraphRAG hint]
         Graph-->>Agent: related items text
-        Agent->>Ollama: POST /api/generate
-        Ollama-->>Agent: JSON response
+        Agent->>LLM: llm.generate(prompt)
+        LLM-->>Agent: response text
         Agent-->>Orch: Analysis
         Orch->>DB: upsert_item + insert_todo/intel
         Orch->>Graph: index_item(analysis)
@@ -115,8 +117,8 @@ sequenceDiagram
 
     Note over Orch: After all items processed:
     Orch->>Agent: generate_project_briefing() [per active project]
-    Agent->>Ollama: POST /api/generate
-    Ollama-->>Agent: briefing text
+    Agent->>LLM: llm.generate(briefing_prompt)
+    LLM-->>Agent: briefing text
     Orch->>DB: save_briefing(content)
 ```
 
@@ -154,11 +156,11 @@ flowchart TD
     GraphCtx["GraphRAG context\ngraph.get_context() →\nup to 4 related items\nscored by edge weight × recency"]
     EmbCtx["Embedding hint\nembedder.get_project_hint() →\nsemantic cluster match"]
     Prompt["Prompt assembly\nUser context + projects + topics +\nnoise keywords + sender hint +\ngraph hint + embedding hint + item"]
-    Ollama["Ollama /api/generate\ntemperature=0.1"]
+    LLMCall["llm.generate()\nOllama local / Ollama Cloud / Claude API\ntemperature=0.1"]
     Parse["JSON parse + validate\n• Clamp priority to high/medium/low\n• Validate project_tag against config\n• Clear action_items if fyi/noise\n• Apply passdown override"]
     Analysis["Analysis object\ncategory, priority, task_type,\naction_items, information_items,\ngoals, key_dates, summary"]
 
-    Raw --> Pre --> GraphCtx --> EmbCtx --> Prompt --> Ollama --> Parse --> Analysis
+    Raw --> Pre --> GraphCtx --> EmbCtx --> Prompt --> LLMCall --> Parse --> Analysis
 ```
 
 Each item passes through several enrichment stages before the LLM ever sees it. Pre-processing handles things that do not require AI: stripping mail-client CAUTION banners (external-sender warnings that would confuse the model), deterministically detecting shift passdown notes via regex, checking whether the sender address matches a project's `senders` or `learned_senders` list, and flagging items the user has already replied to. These deterministic checks are intentionally done before the LLM call to reduce prompt ambiguity and avoid the model having to re-derive obvious facts.

@@ -10,7 +10,7 @@ Parsival includes scheduled auto-scans, an adaptive attention model that learns 
 Browser (/page/)
   └── nginx (:8082)
         └── /page/api/* → FastAPI/uvicorn (:8001, service: page-api)
-                            ├── Ollama (hexcaliper.com via Cloudflare Access)
+                            ├── llm.py → Ollama local / Ollama Cloud / Claude API
                             ├── Slack API
                             ├── Microsoft Teams API (Graph)
                             ├── GitHub API
@@ -35,7 +35,7 @@ Runs alongside the existing Hexcaliper stack. Does not conflict with hexcaliper'
 | Frontend   | Vanilla JS + CSS, served by nginx                           |
 | API        | Python 3.12, FastAPI, uvicorn                               |
 | Storage    | SQLite WAL (`squire.db`) with knowledge-graph tables        |
-| LLM        | Ollama via Hexcaliper appliance (Cloudflare Access)         |
+| LLM        | Ollama (local or cloud) or Claude API, via `llm.py` provider abstraction |
 | Networking | Bridge (`app` network) — same pattern as Hexcaliper         |
 
 ## Connectors
@@ -85,6 +85,25 @@ All credentials can be set in `docker-compose.yml` under the `page-api` environm
 | `MERLLM_URL`       | merLLM base URL for batch jobs (default: `http://host.docker.internal:11400`)    |
 | `LOOKBACK_HOURS`   | Hours of history per scan (default: `48`)                                        |
 | `CREDENTIALS_KEY`  | Passphrase for Fernet encryption of OAuth tokens at rest. Leave unset for plaintext (backward compatible). Changing this key after tokens are stored makes them unreadable. |
+
+### Analysis provider (escalation model)
+
+All LLM calls (analysis, seeding, correlation, briefing) route through the `llm.py` provider abstraction. Three backends are supported:
+
+| Variable              | Description                                                                      |
+|-----------------------|----------------------------------------------------------------------------------|
+| `ESCALATION_PROVIDER` | `ollama` (default), `ollama_cloud`, or `claude`                                  |
+| `ESCALATION_MODEL`    | Model override — when set, used instead of `OLLAMA_MODEL` (e.g. `llama3:70b`, `claude-sonnet-4-20250514`) |
+| `ESCALATION_API_KEY`  | API key for Ollama Cloud (Bearer token) or Claude (`x-api-key`). Not needed for local Ollama. |
+| `ESCALATION_API_URL`  | API base URL for Ollama Cloud (e.g. `https://api.ollama.com`). Claude uses the default `https://api.anthropic.com`. |
+
+**Provider details:**
+
+- **`ollama` (local):** Calls `OLLAMA_URL` directly. Uses `ESCALATION_MODEL` if set, otherwise `OLLAMA_MODEL`. No API key needed.
+- **`ollama_cloud`:** Calls `ESCALATION_API_URL` with a Bearer token from `ESCALATION_API_KEY`. Same Ollama API format as local but routed to the paid cloud endpoint.
+- **`claude`:** Calls the Anthropic Messages API (`https://api.anthropic.com/v1/messages`). Requires `ESCALATION_API_KEY`. Defaults to `claude-sonnet-4-20250514` if `ESCALATION_MODEL` is not set. JSON mode is enforced via a system prompt.
+
+All provider settings are configurable from the Settings UI under "Analysis Provider" and hot-reload without a container restart.
 
 ### User context
 

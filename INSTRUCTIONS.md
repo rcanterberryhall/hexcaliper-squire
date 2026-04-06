@@ -479,6 +479,19 @@ Access via **Settings** in the navigation. All fields can be set here or in `doc
 | Your email | Used to identify direct-address items |
 | Focus topics | Comma-separated keywords — items matching these get `hierarchy=topic` |
 
+### Analysis Provider
+
+Choose which LLM backend Parsival uses for all analysis, seeding, correlation, and briefing tasks.
+
+| Field | Description |
+|-------|-------------|
+| Provider | `ollama` (local, default), `ollama_cloud` (paid Ollama endpoint), or `claude` (Anthropic API) |
+| Model override | Optional — overrides the default Ollama model. E.g. `llama3:70b` for Ollama Cloud or `claude-sonnet-4-20250514` for Claude |
+| API URL | Base URL for Ollama Cloud (e.g. `https://api.ollama.com`). Not needed for local Ollama or Claude |
+| API Key | Bearer token for Ollama Cloud, or `x-api-key` for Claude. Not needed for local Ollama |
+
+The provider-specific fields (API URL, API Key) are shown/hidden dynamically based on the selected provider. Changes take effect immediately.
+
 ### Schedule
 
 | Field | Description |

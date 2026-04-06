@@ -2,6 +2,8 @@
 
 A companion service for [Hexcaliper](https://github.com/rcanterberryhall/hexcaliper) that consolidates responsibilities from Outlook, Slack, GitHub, Jira, and Microsoft Teams into a single ops dashboard. Uses the Hexcaliper Ollama instance to extract action items, priority, goals, key dates, and context-aware relevance signals — no data leaves your infrastructure.
 
+Parsival includes scheduled auto-scans, an adaptive attention model that learns from your behavior, a situation lifecycle workflow, pre-scan noise filters, and encrypted credential storage.
+
 ## Architecture
 
 ```
@@ -78,9 +80,11 @@ All credentials can be set in `docker-compose.yml` under the `page-api` environm
 |--------------------|----------------------------------------------------------------------------------|
 | `CF_CLIENT_ID`     | Cloudflare Access service token ID                                               |
 | `CF_CLIENT_SECRET` | Cloudflare Access service token secret                                           |
-| `OLLAMA_URL`       | Ollama API endpoint (default: `https://ollama.hexcaliper.com/api/generate`)      |
-| `OLLAMA_MODEL`     | Model for extraction (default: `llama3.2`)                                       |
+| `OLLAMA_URL`       | Ollama API endpoint (default: `http://host.docker.internal:11400/api/generate`)  |
+| `OLLAMA_MODEL`     | Model for extraction (default: `qwen3:30b-a3b`)                                 |
+| `MERLLM_URL`       | merLLM base URL for batch jobs (default: `http://host.docker.internal:11400`)    |
 | `LOOKBACK_HOURS`   | Hours of history per scan (default: `48`)                                        |
+| `CREDENTIALS_KEY`  | Passphrase for Fernet encryption of OAuth tokens at rest. Leave unset for plaintext (backward compatible). Changing this key after tokens are stored makes them unreadable. |
 
 ### User context
 
@@ -99,6 +103,7 @@ These fields are passed directly into every LLM prompt and are also used by the 
 |-----------------------|--------------------------------------------------------------------------------------|
 | `SLACK_CLIENT_ID`     | Slack app Client ID (for OAuth)                                                      |
 | `SLACK_CLIENT_SECRET` | Slack app Client Secret                                                              |
+| `SLACK_REDIRECT_URI`  | OAuth callback URL (default: `https://parsival.hexcaliper.com/page/api/slack/callback`) |
 | `SLACK_BOT_TOKEN`     | Legacy bot token (`xoxb-...`) — only used if no user tokens are connected            |
 | `SLACK_CHANNELS`      | Comma-separated channel names for the legacy bot path. Empty = all joined channels   |
 
@@ -112,6 +117,7 @@ Required OAuth user scopes: `channels:history` `channels:read` `groups:history` 
 |-----------------------|----------------------------------------------------------|
 | `TEAMS_CLIENT_ID`     | Azure AD app Client ID (for OAuth)                       |
 | `TEAMS_CLIENT_SECRET` | Azure AD app Client Secret                               |
+| `TEAMS_REDIRECT_URI`  | OAuth callback URL (default: `https://parsival.hexcaliper.com/page/api/teams/callback`) |
 
 Connect your Teams accounts via the Settings page (OAuth flow). Per-user tokens are stored at runtime; no static token env var is required. The OAuth flow uses the Microsoft identity platform and Microsoft Graph API.
 
@@ -121,6 +127,7 @@ Connect your Teams accounts via the Settings page (OAuth flow). Per-user tokens 
 |-------------------|----------------------------------------------------|
 | `GITHUB_PAT`      | GitHub PAT (scopes: `repo`, `notifications`)       |
 | `GITHUB_USERNAME` | Your GitHub username                               |
+| `GITHUB_MAX_NOTIFICATIONS` | Max notifications to fetch across paginated results (default: `500`) |
 
 ### Jira
 
@@ -226,6 +233,102 @@ When you mark an item as noise via `POST /analyses/{item_id}/noise`, Squire:
 3. Merges the keywords into `NOISE_KEYWORDS` (capped at 200 entries) and saves/reloads settings.
 
 On subsequent Slack scans, messages that match only noise keywords (and no positive user/project/topic signal) are silently skipped. The LLM prompt also lists noise keywords so the model can set `category="noise"` for matching email and GitHub items.
+
+## Pre-scan noise filters
+
+Noise filters are evaluated *before* the LLM runs, allowing known-irrelevant items to be skipped without spending an inference cycle. Filtered items are stored with status `filtered` (auditable, not discarded) and skip the LLM pipeline entirely.
+
+Rule types:
+- `sender_contains` — skip items from matching senders (e.g. `"noreply@"`)
+- `subject_contains` — skip by subject/title substring (e.g. `"Out of Office"`)
+- `source_repo` — skip GitHub notifications from specific repos
+- `distribution_list` — skip emails to large distribution lists
+
+Configure filters in Settings → Filters. The UI shows the count of items filtered in the last scan. When marking an item as noise in the main view, a "Create filter from this?" option pre-fills a rule based on the item's sender/source/subject.
+
+Manage filters via the API:
+- `GET /noise-filters` — list all rules
+- `POST /noise-filters` — add a rule
+- `DELETE /noise-filters/{index}` — remove a rule
+
+## Scheduled auto-scans
+
+Parsival can scan each connector on a schedule, eliminating the need to remember to trigger scans manually.
+
+Configure via Settings → Schedule: each connector has an interval dropdown (off / 15m / 30m / 1h / 2h / 4h). The schedule is stored as `scan_schedule` in settings — a dict of `{source: interval_minutes}` where 0 = manual only.
+
+Auto-scans run the same `orchestrator.run_scan()` path as manual scans but only for the scheduled source. Overlapping scans are skipped (if a scan is already running, the scheduled one is logged and deferred).
+
+Check schedule status via `GET /scan/status`, which now includes:
+```json
+{
+  "auto_scans": {
+    "slack": {"next_run": "...", "last_run": "...", "interval_min": 30},
+    "github": {"next_run": "...", "last_run": "...", "interval_min": 60}
+  }
+}
+```
+
+## Situation lifecycle workflow
+
+Situations now have a formal status workflow instead of only being dismissable:
+
+| Status | Meaning |
+|---|---|
+| `new` | Freshly identified by the correlation layer |
+| `investigating` | You are actively looking into it |
+| `waiting` | Blocked or pending external input; has an optional `follow_up_date` |
+| `resolved` | Completed — no further action needed |
+| `dismissed` | Irrelevant (existing behavior, formalized) |
+
+Each situation card has a status dropdown and a "follow up" date picker. Status transitions are logged in a `situation_events` table (situation_id, from_status, to_status, timestamp, note).
+
+The situations list defaults to showing `new` + `investigating` + `waiting` statuses. Resolved/dismissed are accessible via a toggle. Situations in `waiting` status past their `follow_up_date` surface at the top with a visual indicator.
+
+API additions:
+- `PATCH /situations/{id}` now accepts `status` field
+- `GET /situations/{id}/events` — returns the status transition history
+
+## Adaptive attention model
+
+Replaces the fixed 4-tier priority hierarchy with a learned attention score based on your actual behavior. No configuration needed — it watches what you do and adapts.
+
+**Tracked signals** (stored in `user_actions` table):
+- `opened` — clicked to view full analysis
+- `tagged` — assigned a project tag
+- `noised` — marked as noise
+- `dismissed_situation` / `investigated_situation` — situation status changes
+- `deep_analysis` — submitted for deep analysis
+- `todo_created` — created a todo from an item
+
+**How it works:**
+- Two centroid embeddings are maintained incrementally: `attended_centroid` (items you opened, tagged, investigated) and `ignored_centroid` (items untouched for 48h, or explicitly noised).
+- For each new item: `attention_score = cosine_sim(item, attended) - 0.5 * cosine_sim(item, ignored)`, normalized to 0–1.
+- Recency decay: actions older than 30 days contribute at 50% weight, older than 60 days at 25%.
+- Centroids are stored in a `model_state` table and updated incrementally (no full recomputation).
+
+**UI integration:**
+- Items are sorted by attention score by default (switchable to chronological or LLM-priority).
+- High-attention items have a subtle visual weight (bolder border).
+- Briefing generation weights items by attention score.
+
+**Cold start:** until 50 user actions are recorded, the system falls back to the existing LLM priority tier and displays "Learning your attention patterns — prioritization will improve as you use the tool."
+
+API addition:
+- `GET /attention/summary` — returns attention model summary for the merLLM "My Day" panel (situation counts, follow-up counts, high-attention items)
+
+## OAuth security
+
+OAuth flows for Slack and Teams include CSRF protection:
+- A random `state` nonce is generated on each `/slack/connect` and `/teams/connect` request and stored with a 10-minute TTL.
+- The callback validates the `state` parameter and returns 403 if missing or mismatched.
+- Expired state tokens are cleaned up periodically.
+
+Redirect URIs are configurable via `SLACK_REDIRECT_URI` and `TEAMS_REDIRECT_URI` env vars.
+
+## GitHub pagination
+
+The GitHub connector follows `Link: rel="next"` headers and pages through all results up to `GITHUB_MAX_NOTIFICATIONS` (default 500). This prevents silently missing notifications for heavy GitHub users.
 
 ## Passdown detection
 
@@ -344,15 +447,16 @@ Interactive docs: `http://localhost:8001/docs`
 
 ### Situations
 
-Situations are cross-source groupings of related analyses identified automatically by the correlation layer. Each situation has a composite urgency score, a status, and a list of open actions.
+Situations are cross-source groupings of related analyses identified automatically by the correlation layer. Each situation has a composite urgency score, a lifecycle status, optional follow-up date, and a list of open actions.
 
 | Method   | Path                                  | Description                                                                        |
 |----------|---------------------------------------|------------------------------------------------------------------------------------|
-| `GET`    | `/situations`                         | List non-dismissed situations (params: `project`, `status`, `min_score`), sorted by score descending |
+| `GET`    | `/situations`                         | List situations (params: `project`, `status`, `min_score`). Defaults to `new` + `investigating` + `waiting` statuses, sorted by score descending. Overdue follow-ups surface at the top. |
 | `GET`    | `/situations/{id}`                    | Return a single situation with full deserialized analyses in the `items` field     |
 | `POST`   | `/situations/{id}/dismiss`            | Mark situation as dismissed. Optional `{"reason": "..."}` body stores a dismiss reason |
 | `POST`   | `/situations/{id}/rescore`            | Manually trigger score recomputation and LLM re-synthesis for a situation          |
-| `PATCH`  | `/situations/{id}`                    | Update `title`, `status`, or `project_tag` on a situation                          |
+| `PATCH`  | `/situations/{id}`                    | Update `title`, `status`, `follow_up_date`, `notes`, or `project_tag`. Status changes are logged in `situation_events`. |
+| `GET`    | `/situations/{id}/events`             | Return the status transition history for a situation                               |
 | `POST`   | `/situations/{id}/deep-analysis`      | Submit the situation for extended-context deep analysis via merLLM night-mode batch. Returns `{"ok": true, "job_id": "..."}`. Prompt includes situation title, summary, all item summaries, and open actions. |
 | `POST`   | `/situations/{id}/deep-analysis/save` | Fetch completed batch result and store it as an intel item linked to the situation. Body: `{"job_id": "..."}`. Returns 409 if the job is not yet complete. |
 
@@ -397,8 +501,8 @@ Intel items are key facts and completed-action notes extracted by the LLM that a
 
 | Method   | Path                          | Description                                                        |
 |----------|-------------------------------|--------------------------------------------------------------------|
-| `GET`    | `/slack/connect`              | Redirect to Slack OAuth authorisation page                         |
-| `GET`    | `/slack/callback`             | OAuth callback — exchanges code for user token, saves to settings  |
+| `GET`    | `/slack/connect`              | Redirect to Slack OAuth authorisation page (includes CSRF `state` nonce) |
+| `GET`    | `/slack/callback`             | OAuth callback — validates `state`, exchanges code for user token, encrypts and saves to settings |
 | `GET`    | `/slack/workspaces`           | List connected workspaces (team name and ID)                       |
 | `DELETE` | `/slack/workspaces/{team_id}` | Disconnect a workspace                                             |
 
@@ -406,8 +510,8 @@ Intel items are key facts and completed-action notes extracted by the LLM that a
 
 | Method   | Path                             | Description                                                              |
 |----------|----------------------------------|--------------------------------------------------------------------------|
-| `GET`    | `/teams/connect`                 | Redirect to Microsoft identity platform OAuth authorisation page         |
-| `GET`    | `/teams/callback`                | OAuth callback — exchanges code for user token, saves to settings        |
+| `GET`    | `/teams/connect`                 | Redirect to Microsoft identity platform OAuth authorisation page (includes CSRF `state` nonce) |
+| `GET`    | `/teams/callback`                | OAuth callback — validates `state`, exchanges code for user token, encrypts and saves to settings |
 | `GET`    | `/teams/workspaces`              | List connected accounts (display name, account ID, tenant)               |
 | `DELETE` | `/teams/workspaces/{account_id}` | Disconnect a Teams account                                               |
 
@@ -421,6 +525,24 @@ Intel items are key facts and completed-action notes extracted by the LLM that a
 | `POST`  | `/seed/apply`     | Apply confirmed projects and topics to settings; triggers re-tagging, embedding, and re-analysis               |
 | `POST`  | `/seed/scan`      | Advance from `scan_prompt` to `scanning` — runs a full connector scan, then transitions to `done`              |
 | `POST`  | `/seed/skip_scan` | Advance from `scan_prompt` to `done` without running a connector scan                                          |
+
+### Attention model
+
+| Method | Path                  | Description                                                              |
+|--------|-----------------------|--------------------------------------------------------------------------|
+| `GET`  | `/attention/summary`  | Attention model summary for the merLLM "My Day" panel: situation counts, overdue follow-ups, high-attention items |
+
+### Noise filters
+
+| Method   | Path                    | Description                                                            |
+|----------|-------------------------|------------------------------------------------------------------------|
+| `GET`    | `/noise-filters`        | List all pre-scan noise filter rules                                   |
+| `POST`   | `/noise-filters`        | Add a noise filter rule (`{"type": "sender_contains", "value": "..."}`) |
+| `DELETE` | `/noise-filters/{index}` | Remove a noise filter rule by index                                   |
+
+## Request logging
+
+All HTTP requests are logged via middleware: timestamp, method, path, status code, duration (ms), and user email (from `CF-Access-Authenticated-User-Email` header, or `anonymous`). Log levels: INFO for 2xx/3xx, WARNING for 4xx, ERROR for 5xx.
 
 ## Data persistence
 

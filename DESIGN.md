@@ -54,18 +54,21 @@ Email sources (Outlook and Thunderbird) cannot run inside Docker because they re
 
 | Module | Responsibility |
 |--------|---------------|
-| `app.py` | FastAPI routes, HTTP layer, background task dispatch, project/noise/category learning, briefing builder |
-| `orchestrator.py` | Scan, re-analysis, and ingest pipeline execution; Ollama concurrency semaphore; triggers briefing after each run |
+| `app.py` | FastAPI routes, HTTP layer, background task dispatch, project/noise/category learning, briefing builder, noise filter + attention + schedule endpoints |
+| `orchestrator.py` | Scan, re-analysis, and ingest pipeline execution; Ollama concurrency semaphore; triggers briefing after each run; auto-scan scheduler |
 | `agent.py` | Prompt construction, Ollama call, JSON response parsing → `Analysis`; per-project briefing generation |
-| `db.py` | SQLite schema, connection management, all CRUD helpers |
+| `db.py` | SQLite schema, connection management, all CRUD helpers (includes `situation_events`, `user_actions`, `model_state` tables) |
 | `graph.py` | Knowledge graph CRUD, context retrieval, GraphRAG scoring |
-| `situation_manager.py` | Cross-source situation formation, LLM synthesis, score decay |
+| `situation_manager.py` | Cross-source situation formation, LLM synthesis, score decay, lifecycle status transitions |
+| `attention.py` | Adaptive attention model: score computation, centroid update with recency decay, cold-start detection |
+| `noise_filter.py` | Pre-scan noise filter evaluation against configurable rules |
+| `crypto.py` | Fernet encryption/decryption for OAuth tokens at rest (keyed from `CREDENTIALS_KEY`) |
 | `embedder.py` | Sentence-embedding centroids per project (all-MiniLM-L6-v2) |
 | `correlator.py` | Heuristic item-to-situation matching (project, topic, author overlap) |
 | `seeder.py` | Seed state machine (ingest → LLM proposal → review → apply → reanalyze) |
 | `models.py` | Pydantic models: `RawItem`, `Analysis`, `ActionItem` |
 | `config.py` | Environment variable loading and hot-reload helpers |
-| `connector_*.py` | Source-specific fetch logic (one per connector) |
+| `connector_*.py` | Source-specific fetch logic (one per connector); GitHub connector follows `Link` header pagination |
 
 `app.py` is the HTTP boundary — it owns all FastAPI route definitions and delegates all heavy work outward. `orchestrator.py` owns the analysis pipeline and is the only module that calls `agent.py` for LLM inference. `db.py` is the only module that touches SQLite directly; all other modules call its helper functions rather than writing SQL themselves. This separation means the storage layer can be tested or replaced without touching business logic.
 
@@ -270,6 +273,19 @@ After every item is saved, `_spawn_situation_task()` submits a background job to
 
 The score decay thread runs every 30 minutes. Situations whose constituent items are all old and have no new activity have their score multiplied by 0.95 per cycle, gradually sinking them below the active threshold. A new item arriving in an existing situation resets the decay clock and rescores the cluster upward.
 
+### 7.1 Situation lifecycle
+
+Situations have a formal status workflow stored in the `situations` table and logged in `situation_events`:
+
+```
+new → investigating → waiting (with follow_up_date) → resolved
+                  └── dismissed
+```
+
+Status transitions are logged in the `situation_events` table: `(situation_id, from_status, to_status, timestamp, note)`. The `follow_up_date` and `notes` fields on the situation record support the `waiting` state — situations past their follow-up date are surfaced at the top of the list.
+
+The default query filter excludes `resolved` and `dismissed` situations, showing only active work. This prevents the list from growing unbounded while keeping the history accessible.
+
 ---
 
 ## 8. Seed Workflow State Machine
@@ -347,6 +363,29 @@ erDiagram
         real score
         text project_tag
         int  dismissed
+        text follow_up_date
+        text notes
+    }
+
+    situation_events {
+        int  id PK
+        text situation_id FK
+        text from_status
+        text to_status
+        text timestamp
+        text note
+    }
+
+    user_actions {
+        int  id PK
+        text item_id
+        text action_type
+        text timestamp
+    }
+
+    model_state {
+        text key PK
+        text value
     }
 
     embeddings {
@@ -365,6 +404,7 @@ erDiagram
     items ||--o{ todos : "item_id"
     items ||--o{ intel : "item_id"
     items }o--|| situations : "situation_id"
+    situations ||--o{ situation_events : "situation_id"
 ```
 
 The schema follows a hub-and-spoke pattern centred on the `items` table. Every `todo` and `intel` row points back to the item it was extracted from via `item_id`, which means deleting or re-analyzing an item can cleanly cascade to its derived rows. Items point to `situations` via a nullable `situation_id` foreign key — the relationship is many-to-one from item to situation, but the situation table also stores a JSON `item_ids` array for fast lookup in the reverse direction without a join.
@@ -515,3 +555,99 @@ Squire runs several concurrent threads against a shared SQLite database and a sh
 `db.lock` (a `threading.Lock()`) serialises all SQLite write operations. SQLite's WAL mode already allows concurrent reads to proceed while a write is in progress, so reads do not need to acquire this lock. Only operations that call `INSERT`, `UPDATE`, `DELETE`, or `UPSERT` acquire `db.lock`. Callers that need atomicity across multiple write operations — for example, upsert an item then insert a todo — acquire the lock themselves and call the `db.*` helpers within a single `with db.lock:` block.
 
 All long-running background jobs (`run_scan`, `run_reanalyze`, `process_ingest_items`) check `scan_state["cancelled"]` before processing each item and exit cleanly after the current item finishes. This means a cancel request is always honoured within one item's worth of latency (typically a few seconds) rather than requiring a process kill.
+
+---
+
+## 17. Scheduled Auto-Scans
+
+The orchestrator maintains a per-source scheduler using `asyncio` periodic tasks. The `scan_schedule` setting is a dict of `{source: interval_minutes}` where 0 = manual only. On startup (and whenever settings change via `POST /settings`), `orchestrator.scheduler_update()` cancels existing timers and registers new ones.
+
+Each scheduled scan runs `orchestrator.run_scan()` for its single source. If a scan is already running (the `_sem` is held), the scheduled scan logs a skip and defers to the next interval. This prevents pile-up when the LLM is slow or when multiple sources are scheduled at close intervals.
+
+Schedule status is exposed via `GET /scan/status`, which includes a `auto_scans` dict with `next_run`, `last_run`, and `interval_min` per source.
+
+---
+
+## 18. Pre-Scan Noise Filters
+
+`noise_filter.py` evaluates items against configurable rules *before* the LLM pipeline. Rules are stored in `settings["noise_filters"]` as a list of `{"type": str, "value": str}` dicts. Four rule types are supported:
+
+| Type | Match logic |
+|------|-------------|
+| `sender_contains` | Case-insensitive substring match on `item.author` |
+| `subject_contains` | Case-insensitive substring match on `item.title` |
+| `source_repo` | Exact match on GitHub notification `repository.full_name` |
+| `distribution_list` | Case-insensitive substring match on `item.metadata.to` or `item.metadata.cc` |
+
+Items matching any rule are stored with a `filtered` status and skip the entire analysis pipeline (no embedding, no LLM call, no graph indexing, no situation formation). This is a pure efficiency optimisation — it prevents known-noise patterns from consuming inference time — and is fully auditable since filtered items remain in the database.
+
+The UI offers a "Create filter from this?" flow when marking an item as noise, pre-filling the rule from the item's properties.
+
+---
+
+## 19. Adaptive Attention Model
+
+`attention.py` implements an implicit attention scoring system that replaces the fixed 4-tier priority hierarchy with a learned model based on the user's actual behavior.
+
+### Signal collection
+
+Every user action is recorded in the `user_actions` table: `(item_id, action_type, timestamp)`. Action types: `opened`, `tagged`, `noised`, `dismissed_situation`, `investigated_situation`, `deep_analysis`, `todo_created`. These are inserted by the relevant endpoint handlers in `app.py`.
+
+### Centroid maintenance
+
+Two embedding centroids are maintained in `model_state`:
+
+- **`attended_centroid`** — incrementally updated from embeddings of items the user opened, tagged, investigated, or submitted for deep analysis.
+- **`ignored_centroid`** — incrementally updated from embeddings of items untouched for 48 hours after ingestion, plus explicitly noised items.
+
+Centroid update is incremental: `new_centroid = (old_centroid * n + new_embedding) / (n + 1)`. No full recomputation is needed.
+
+### Recency decay
+
+Actions older than 30 days contribute at 50% weight; older than 60 days at 25%. This ensures the model adapts as the user's focus shifts across project phases without requiring configuration changes.
+
+### Score computation
+
+For each new item after analysis:
+```
+attention_score = cosine_sim(item_embedding, attended_centroid)
+               - 0.5 * cosine_sim(item_embedding, ignored_centroid)
+```
+Normalized to [0, 1]. The score supplements the LLM-assigned priority.
+
+### Cold start
+
+Until 50 user actions are recorded (`db.count_user_actions() < 50`), the system falls back to the existing LLM priority tier. The UI displays a cold-start message explaining that prioritization will improve with use.
+
+### Integration points
+
+- Items are sorted by `attention_score` by default in the UI.
+- The briefing generator weights items by attention score.
+- `GET /attention/summary` returns an aggregate for the merLLM "My Day" panel.
+
+---
+
+## 20. Credential Encryption
+
+`crypto.py` provides Fernet-based encryption for OAuth tokens at rest. A key is derived from the `CREDENTIALS_KEY` env var using SHA-256. The module handles three scenarios transparently:
+
+| `CREDENTIALS_KEY` set? | Value looks encrypted? | Result |
+|---|---|---|
+| Yes | No (plaintext) | Encrypt on read, store encrypted |
+| Yes | Yes (Fernet token) | Decrypt normally |
+| No | Any | Return as-is (plaintext mode) |
+
+This design means enabling encryption on an existing deployment is non-destructive — existing plaintext tokens are silently migrated to encrypted form on first access. A startup warning is logged when `CREDENTIALS_KEY` is not set.
+
+---
+
+## 21. OAuth Security
+
+Slack and Teams OAuth flows include CSRF protection via a `state` parameter:
+
+1. On each `/slack/connect` or `/teams/connect` request, a random nonce is generated and stored in a short-lived dict with a 10-minute TTL.
+2. The nonce is included as the `state` query parameter in the OAuth redirect URL.
+3. The callback handler validates that the returned `state` matches a stored nonce. If missing or mismatched, the request is rejected with 403.
+4. Expired nonces are cleaned up periodically.
+
+Redirect URIs are configurable via `SLACK_REDIRECT_URI` and `TEAMS_REDIRECT_URI` env vars, removing the previous hardcoded dependency on `parsival.hexcaliper.com`.

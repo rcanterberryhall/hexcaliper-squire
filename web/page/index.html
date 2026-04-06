@@ -1147,11 +1147,13 @@ tr.attn-low  { opacity:0.65; }
 
     <div class="help-section">
       <h3>Situations</h3>
-      <p>Situations are cross-source groupings of related items that the system identifies as part of the same operational thread — for example, an email thread, a Slack conversation, and a Jira ticket all about the same issue. Each situation has a status, a composite urgency score, and a deduplicated action list.</p>
+      <p>Situations are cross-source groupings of related items that the system identifies as part of the same operational thread — for example, an email thread, a Slack conversation, and a Jira ticket all about the same issue. Each situation has a lifecycle status, a composite urgency score, optional follow-up date, and a deduplicated action list.</p>
       <dl class="help-kv">
-        <dt>Status</dt><dd>blocked · in_progress · waiting · needs_decision · informational</dd>
+        <dt>Status workflow</dt><dd><strong>new</strong> → <strong>investigating</strong> → <strong>waiting</strong> (with optional follow-up date) → <strong>resolved</strong> or <strong>dismissed</strong>. Use the status dropdown on each situation card.</dd>
+        <dt>Follow-up date</dt><dd>Set a date when the situation needs attention next. Situations in "waiting" status past their follow-up date surface at the top of the list with a visual indicator.</dd>
         <dt>Score</dt><dd>Composite urgency — higher means more attention needed now.</dd>
-        <dt>Dismiss</dt><dd>Hides the situation from the list without deleting the underlying items.</dd>
+        <dt>Default filter</dt><dd>The list shows <strong>new</strong>, <strong>investigating</strong>, and <strong>waiting</strong> situations by default. Toggle to see resolved/dismissed.</dd>
+        <dt>Transition log</dt><dd>Every status change is logged with timestamp and optional note.</dd>
       </dl>
     </div>
 
@@ -1172,6 +1174,33 @@ tr.attn-low  { opacity:0.65; }
       <h3>Project learning</h3>
       <p>When you manually tag an item to a project (via ◈), Parsival extracts keywords from the item in the background and adds them to the project's learned keyword list. It also records the sender's address in the project's learned senders list. Both feed into future scans automatically.</p>
       <p>You can inspect and remove learned keywords and senders from the project row in Settings → Projects (click <strong>inspect</strong>).</p>
+    </div>
+
+    <div class="help-section">
+      <h3>Scheduled auto-scans</h3>
+      <p>Configure automatic scanning per connector in Settings → Schedule. Each source can be set to scan at a fixed interval (off / 15m / 30m / 1h / 2h / 4h). Auto-scans run the same analysis pipeline as manual scans. If a scan is already running, the scheduled one is skipped.</p>
+      <p>Check schedule status in the scan status area — it shows the next run time and last run time for each scheduled source.</p>
+    </div>
+
+    <div class="help-section">
+      <h3>Pre-scan noise filters</h3>
+      <p>Noise filters skip known-irrelevant items <em>before</em> the LLM runs, saving inference time. Filtered items are stored as "filtered" (auditable) but skip the analysis pipeline.</p>
+      <dl class="help-kv">
+        <dt>Rule types</dt><dd><strong>sender_contains</strong> (e.g. "noreply@"), <strong>subject_contains</strong> (e.g. "Out of Office"), <strong>source_repo</strong> (GitHub repo name), <strong>distribution_list</strong> (email alias).</dd>
+        <dt>Create from noise</dt><dd>When marking an item as noise, you can choose "Create filter from this?" to auto-fill a rule from the item's properties.</dd>
+        <dt>Manage</dt><dd>Settings → Filters shows all rules with the count of items filtered in the last scan.</dd>
+      </dl>
+    </div>
+
+    <div class="help-section">
+      <h3>Adaptive attention model</h3>
+      <p>Parsival learns from your behavior to surface items you're most likely to care about. It tracks actions like opening items, tagging projects, marking noise, and changing situation status — then uses embedding similarity to predict attention for new items.</p>
+      <dl class="help-kv">
+        <dt>Sorting</dt><dd>Items are sorted by attention score by default. Switch to chronological or LLM-priority via the sort control.</dd>
+        <dt>Visual weight</dt><dd>High-attention items have a bolder border — no numbers or badges to add noise.</dd>
+        <dt>Cold start</dt><dd>Until 50 actions are recorded, the system uses the LLM's priority tier and shows "Learning your attention patterns — prioritization will improve as you use the tool."</dd>
+        <dt>Adaptation</dt><dd>The model adapts as your focus shifts — actions older than 30 days contribute at 50% weight, older than 60 days at 25%. No configuration needed.</dd>
+      </dl>
     </div>
 
     <div class="help-section">

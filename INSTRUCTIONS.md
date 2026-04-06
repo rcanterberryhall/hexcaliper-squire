@@ -6,17 +6,20 @@
 2. [The seed workflow](#2-the-seed-workflow)
 3. [Connecting sources](#3-connecting-sources)
 4. [Running a scan](#4-running-a-scan)
-5. [Understanding the dashboard](#5-understanding-the-dashboard)
-6. [Managing todos](#6-managing-todos)
-7. [Reviewing analyses](#7-reviewing-analyses)
-8. [Situations](#8-situations)
-9. [Intel](#9-intel)
-10. [Project configuration](#10-project-configuration)
-11. [Settings reference](#11-settings-reference)
-12. [Outlook sidecar (Windows)](#12-outlook-sidecar-windows)
-13. [Thunderbird sidecar (Ubuntu)](#13-thunderbird-sidecar-ubuntu)
-14. [Re-analysis](#14-re-analysis)
-15. [Maintenance](#15-maintenance)
+5. [Scheduled auto-scans](#5-scheduled-auto-scans)
+6. [Understanding the dashboard](#6-understanding-the-dashboard)
+7. [Managing todos](#7-managing-todos)
+8. [Reviewing analyses](#8-reviewing-analyses)
+9. [Pre-scan noise filters](#9-pre-scan-noise-filters)
+10. [Situations](#10-situations)
+11. [Adaptive attention model](#11-adaptive-attention-model)
+12. [Intel](#12-intel)
+13. [Project configuration](#13-project-configuration)
+14. [Settings reference](#14-settings-reference)
+15. [Outlook sidecar (Windows)](#15-outlook-sidecar-windows)
+16. [Thunderbird sidecar (Ubuntu)](#16-thunderbird-sidecar-ubuntu)
+17. [Re-analysis](#17-re-analysis)
+18. [Maintenance](#18-maintenance)
 
 ---
 
@@ -38,6 +41,8 @@ Edit `docker-compose.yml`. Search for `your-` to find every placeholder:
 | `your-cf-client-secret` | Cloudflare Access service token Client Secret |
 | `your-name` | Your display name, e.g. `Jane Smith` |
 | `your-email` | Your email address |
+
+Optional but recommended: set `CREDENTIALS_KEY` to a strong random value (e.g. a UUID4) to encrypt OAuth tokens at rest in SQLite.
 
 Everything else (Slack, GitHub, Jira, etc.) can be left blank initially and filled in later via the Settings page.
 
@@ -151,7 +156,35 @@ To cancel mid-scan, click **Stop**. Items already analysed are kept; the scan lo
 
 ---
 
-## 5. Understanding the dashboard
+## 5. Scheduled auto-scans
+
+Instead of triggering scans manually, you can schedule each connector to scan on a fixed interval.
+
+### Configuring schedules
+
+Go to **Settings → Schedule**. Each source has an interval dropdown:
+
+| Interval | Meaning |
+|----------|---------|
+| Off | Manual only (default) |
+| 15m / 30m / 1h / 2h / 4h | Scan this source at the selected interval |
+
+Changes take effect immediately — no restart required.
+
+### How auto-scans work
+
+- Auto-scans run the same pipeline as manual scans (same analysis, same graph indexing, same situation formation).
+- Each auto-scan runs only for its scheduled source, not all sources at once.
+- If a scan is already running when a scheduled scan is due, the scheduled scan is skipped and logged.
+- Schedule status is visible in `GET /scan/status` — shows next/last run times per source.
+
+### Recommended setup
+
+For most workflows, schedule Slack and Teams at 15–30 minutes, GitHub at 1 hour, and leave Outlook/Thunderbird on the sidecar cron. Jira can often run at 2–4 hours since ticket updates are less time-sensitive than messages.
+
+---
+
+## 6. Understanding the dashboard
 
 ### Item badges
 
@@ -187,7 +220,7 @@ Use the filter bar above the list to narrow by source, category, priority, or pr
 
 ---
 
-## 6. Managing todos
+## 7. Managing todos
 
 ### Viewing todos
 
@@ -229,7 +262,7 @@ Click the **✕** button on a todo row. This permanently removes the row.
 
 ---
 
-## 7. Reviewing analyses
+## 8. Reviewing analyses
 
 ### Opening an item
 
@@ -272,31 +305,68 @@ Future items matching these keywords will be pre-labelled as noise by the LLM.
 
 ---
 
-## 8. Situations
+## 9. Pre-scan noise filters
 
-Situations are automatically-formed cross-source clusters. When multiple items relate to the same event or workstream (e.g. a production incident generating Slack messages, GitHub issues, and Jira tickets), Squire groups them into a single situation with a composite urgency score.
+Pre-scan filters skip known-irrelevant items *before* the LLM runs, saving inference time and reducing noise without waiting for the model.
+
+### Managing filters
+
+Go to **Settings → Filters**. Each filter is a rule with a type and value:
+
+| Rule type | Example | What it skips |
+|-----------|---------|---------------|
+| `sender_contains` | `noreply@` | Items from matching senders |
+| `subject_contains` | `Out of Office` | Items with matching subject/title |
+| `source_repo` | `some-repo-i-only-watch` | GitHub notifications from that repo |
+| `distribution_list` | `all-company@corp.com` | Emails to that distribution list |
+
+### Creating filters from noise
+
+When you mark an item as noise in the main view, Parsival offers a "Create filter from this?" option that pre-fills a rule based on the item's sender, source, or subject. This is the fastest way to build your filter list.
+
+### What happens to filtered items
+
+Filtered items are stored with status `filtered` — they are auditable (you can see them) but skip the entire LLM pipeline. The Settings → Filters page shows the count of items filtered in the last scan.
+
+---
+
+## 10. Situations
+
+Situations are automatically-formed cross-source clusters. When multiple items relate to the same event or workstream (e.g. a production incident generating Slack messages, GitHub issues, and Jira tickets), Parsival groups them into a single situation with a composite urgency score and a lifecycle workflow.
 
 ### Viewing situations
 
-Open the **Situations** tab. Items are sorted by score descending (most urgent first). Each situation shows:
+Open the **Situations** tab. The list defaults to showing situations with status **new**, **investigating**, or **waiting**. Situations are sorted by score descending (most urgent first), with overdue follow-ups surfaced at the top with a visual indicator.
+
+Each situation shows:
 - LLM-generated title and summary
+- Status badge (new / investigating / waiting / resolved / dismissed)
 - Composite urgency score
+- Follow-up date (if set)
 - Contributing sources
 - Open action items (union of all constituent todos)
 
+### Status workflow
+
+Each situation has a formal lifecycle. Use the status dropdown on a situation card to transition it:
+
+| Status | When to use |
+|--------|-------------|
+| `new` | Default — freshly identified by the correlation layer |
+| `investigating` | You are actively looking into it |
+| `waiting` | Blocked or pending external input. Set a follow-up date to be reminded. |
+| `resolved` | Completed — no further action needed |
+| `dismissed` | Irrelevant to your work |
+
+Every status change is logged with a timestamp and optional note. View the transition history by clicking the situation's event log.
+
+### Follow-up dates
+
+When a situation is in `waiting` status, set a follow-up date using the date picker. When the date passes, the situation surfaces at the top of the list with a visual indicator so you don't forget about it.
+
 ### Filtering situations
 
-Use the filter bar to narrow by `project`, `status`, or `min_score`.
-
-### Editing a situation
-
-Click a situation to open it, then click **Edit** to update the title, status, or project tag.
-
-Status values: `in_progress`, `monitoring`, `resolved`
-
-### Dismissing a situation
-
-Click **Dismiss** to hide a situation from the main view. An optional reason can be recorded. Dismissed situations are retrievable by passing `?dismissed=true` to `GET /situations`.
+Use the filter bar to narrow by `project`, `status`, or `min_score`. Toggle "Show resolved/dismissed" to see completed situations.
 
 ### Manually rescoring
 
@@ -304,7 +374,36 @@ Click **Rescore** to trigger immediate score recomputation and LLM re-synthesis 
 
 ---
 
-## 9. Intel
+## 11. Adaptive attention model
+
+Parsival learns from your behavior to predict which items deserve your attention. This replaces static priority tiers with a learned attention score — no configuration needed.
+
+### How it works
+
+Every time you interact with an item (open it, tag it, mark it as noise, change a situation status, submit for deep analysis, or create a todo), Parsival records the action. It maintains two embedding centroids:
+
+- **Attended centroid** — the average embedding of items you've interacted with positively (opened, tagged, investigated, deep-analysed).
+- **Ignored centroid** — the average embedding of items you never touched within 48 hours, or explicitly marked as noise.
+
+For each new item, an attention score is computed: how similar it is to what you typically care about, minus how similar it is to what you typically ignore.
+
+### What you see
+
+- Items are sorted by attention score by default. You can switch to chronological or LLM-priority sorting via the sort control above the list.
+- High-attention items have a subtly bolder border — no numbers or noisy badges.
+- The briefing generation weights items by attention score, so high-attention items get more space.
+
+### Cold start
+
+Until you've recorded 50 actions, the system displays "Learning your attention patterns — prioritization will improve as you use the tool" and falls back to the LLM's priority tier for sorting.
+
+### Adaptation over time
+
+The model adapts as your focus shifts. Actions older than 30 days contribute at 50% weight; older than 60 days at 25%. When you're deep in a commissioning week, commissioning-related items float up. When you shift to vendor management, those items rise instead. No settings change needed.
+
+---
+
+## 12. Intel
 
 Intel items are key facts and completed-action notes extracted by the LLM that are worth knowing but are not action items for you — e.g. "Server was rebooted at 03:00", "PR #421 was merged by Alice".
 
@@ -318,7 +417,7 @@ Click **Dismiss** on an intel row to hide it. Unlike situations, dismissed intel
 
 ---
 
-## 10. Project configuration
+## 13. Project configuration
 
 Projects are the core of Squire's relevance engine. Each project acts as a named workstream that items can be tagged to.
 
@@ -360,7 +459,7 @@ Delete the project object from the `PROJECTS` array in Settings and save. Existi
 
 ---
 
-## 11. Settings reference
+## 14. Settings reference
 
 Access via **Settings** in the navigation. All fields can be set here or in `docker-compose.yml`. Changes take effect immediately without a container restart.
 
@@ -380,9 +479,23 @@ Access via **Settings** in the navigation. All fields can be set here or in `doc
 | Your email | Used to identify direct-address items |
 | Focus topics | Comma-separated keywords — items matching these get `hierarchy=topic` |
 
+### Schedule
+
+| Field | Description |
+|-------|-------------|
+| Source intervals | Per-source auto-scan interval (off / 15m / 30m / 1h / 2h / 4h) |
+
+### Noise filters
+
+| Field | Description |
+|-------|-------------|
+| Filter rules | List of pre-scan rules (sender_contains, subject_contains, source_repo, distribution_list) |
+
 ### Secrets
 
 Secrets are displayed masked after first entry. Submitting a masked value (containing `•`) leaves the original intact — you only need to re-enter a secret if you are changing it.
+
+When `CREDENTIALS_KEY` is set, all OAuth tokens (Slack, Teams) are encrypted at rest using Fernet (AES-128-CBC + HMAC-SHA256). Without it, tokens are stored in plaintext (backward compatible). A startup warning is logged when encryption is not configured.
 
 | Field | Notes |
 |-------|-------|
@@ -396,7 +509,7 @@ Secrets are displayed masked after first entry. Submitting a masked value (conta
 
 ---
 
-## 12. Outlook sidecar (Windows)
+## 15. Outlook sidecar (Windows)
 
 The Outlook sidecar reads from the local Outlook client via `win32com` and POSTs to Squire. It must run on the Windows machine where Outlook is installed.
 
@@ -457,7 +570,7 @@ Each email item includes:
 
 ---
 
-## 13. Thunderbird sidecar (Ubuntu)
+## 16. Thunderbird sidecar (Ubuntu)
 
 ### Install dependencies
 
@@ -491,7 +604,7 @@ crontab -e
 
 ---
 
-## 14. Re-analysis
+## 17. Re-analysis
 
 Re-analysis re-runs the LLM on all stored items using the current settings. Use it after:
 - Adding new projects or keywords
@@ -525,7 +638,7 @@ curl http://localhost:8082/page/api/reanalyze/count
 
 ---
 
-## 15. Maintenance
+## 18. Maintenance
 
 ### Wipe all data (keep settings)
 

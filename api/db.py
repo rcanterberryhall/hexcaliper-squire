@@ -39,6 +39,57 @@ from typing import Any, Optional
 
 import config
 
+# ── Project-tag helpers (multi-tag support) ───────────────────────────────────
+#
+# project_tag is stored as a JSON array string: '["P905","Seatbelts upgrades"]'
+# For backward compat, a bare string like "P905" is treated as '["P905"]'.
+
+def parse_project_tags(val) -> list[str]:
+    """Parse a project_tag column value into a list of project names.
+
+    Handles: None → [], bare string → [string], JSON array string → list.
+    """
+    if not val:
+        return []
+    if isinstance(val, list):
+        return [t for t in val if t]
+    val = val.strip()
+    if val.startswith("["):
+        try:
+            tags = json.loads(val)
+            return [t for t in tags if isinstance(t, str) and t]
+        except (json.JSONDecodeError, TypeError):
+            return [val] if val else []
+    return [val]
+
+
+def serialize_project_tags(tags) -> str | None:
+    """Serialize a list of project names to a JSON array string for storage.
+
+    Returns None for empty lists (column stays NULL for untagged items).
+    """
+    if not tags:
+        return None
+    if isinstance(tags, str):
+        tags = parse_project_tags(tags)
+    tags = [t for t in tags if t]
+    if not tags:
+        return None
+    if len(tags) == 1:
+        return tags[0]  # keep single tags as plain strings for readability
+    return json.dumps(tags)
+
+
+def item_has_project(item: dict, project: str) -> bool:
+    """Check whether an item record is tagged to a given project."""
+    return project in parse_project_tags(item.get("project_tag"))
+
+
+def item_has_any_project(item: dict) -> bool:
+    """Check whether an item has any project tag at all."""
+    return bool(parse_project_tags(item.get("project_tag")))
+
+
 # ── Module-level state ─────────────────────────────────────────────────────────
 
 lock = threading.Lock()          # exposed to callers for atomic operations
@@ -312,10 +363,15 @@ def get_all_items() -> list[dict]:
 
 
 def get_items_by_project(project_tag: str) -> list[dict]:
-    """Return all items with a specific project tag."""
-    return _rows_to_list(
-        conn().execute("SELECT * FROM items WHERE project_tag = ?", (project_tag,)).fetchall()
+    """Return all items tagged to a project (handles both single and multi-tag storage)."""
+    # Exact match covers single-tag rows; JSON array rows need LIKE + parse check
+    rows = _rows_to_list(
+        conn().execute(
+            "SELECT * FROM items WHERE project_tag = ? OR project_tag LIKE ?",
+            (project_tag, f'%"{project_tag}"%'),
+        ).fetchall()
     )
+    return [r for r in rows if project_tag in parse_project_tags(r.get("project_tag"))]
 
 
 def get_items_by_conversation(conversation_id: str) -> list[dict]:
@@ -373,13 +429,25 @@ def update_item(item_id: str, updates: dict) -> None:
 
 
 def update_items_by_project(project_tag: str, updates: dict) -> None:
-    """Apply a partial update to all items with a given project_tag."""
+    """Apply a partial update to all items tagged to a project (handles multi-tag).
+
+    When updates contains project_tag=None, removes the given tag from multi-tag
+    items rather than NULLing the whole column.
+    """
     if not updates:
         return
+    items = get_items_by_project(project_tag)
     c = conn()
-    set_clause = ", ".join(f'"{k}" = ?' for k in updates)
-    values     = list(updates.values()) + [project_tag]
-    c.execute(f"UPDATE items SET {set_clause} WHERE project_tag = ?", values)
+    clearing_tag = "project_tag" in updates and updates["project_tag"] is None
+    for item in items:
+        item_updates = dict(updates)
+        if clearing_tag:
+            # Remove just this tag; keep others
+            tags = [t for t in parse_project_tags(item.get("project_tag")) if t != project_tag]
+            item_updates["project_tag"] = serialize_project_tags(tags)
+        set_clause = ", ".join(f'"{k}" = ?' for k in item_updates)
+        values = list(item_updates.values()) + [item["item_id"]]
+        c.execute(f"UPDATE items SET {set_clause} WHERE item_id = ?", values)
 
 
 def count_items() -> int:
@@ -423,7 +491,7 @@ def get_todos(
     if priority:
         sql  += " AND priority = ?"; args.append(priority)
     if project_tag:
-        sql  += " AND project_tag = ?"; args.append(project_tag)
+        sql  += " AND (project_tag = ? OR project_tag LIKE ?)"; args.extend([project_tag, f'%"{project_tag}"%'])
     sql += " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, created_at"
     return _rows_to_list(c.execute(sql, args).fetchall())
 
@@ -574,10 +642,21 @@ def update_intel_by_id(intel_id: int, updates: dict) -> None:
     c.execute(f"UPDATE intel SET {set_clause} WHERE id = ?", values)
 
 
-def update_intel_project(item_id: str, project_tag: Optional[str]) -> None:
-    """Sync project_tag on all intel rows for an item."""
+def update_intel_project(item_id: str, project_tag) -> None:
+    """Sync project_tag on all intel rows for an item.
+
+    Accepts a single tag string, a list of tags, or a serialized JSON array.
+    Intel rows store a single tag (the first/primary), since each intel fact
+    typically belongs to one project context.
+    """
+    # Intel rows keep a single tag — use the first from a multi-tag value
+    if isinstance(project_tag, list):
+        primary = project_tag[0] if project_tag else None
+    else:
+        tags = parse_project_tags(project_tag)
+        primary = tags[0] if tags else None
     conn().execute(
-        "UPDATE intel SET project_tag = ? WHERE item_id = ?", (project_tag, item_id)
+        "UPDATE intel SET project_tag = ? WHERE item_id = ?", (primary, item_id)
     )
 
 

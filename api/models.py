@@ -86,8 +86,9 @@ class Analysis:
     :ivar hierarchy: Relevance tier — ``"user"``, ``"project"``, ``"topic"``,
                      or ``"general"``.  Defaults to ``"general"``.
     :ivar is_passdown: ``True`` when the item is a shift handoff/passdown note.
-    :ivar project_tag: Name of the configured project this item belongs to, or
-                       ``None`` if untagged.
+    :ivar project_tag: JSON-serialized list of project names this item belongs
+                       to, or ``None`` if untagged.  A single string is also
+                       accepted for backward compat.
     :ivar direction: ``"received"`` (default) or ``"sent"`` — whether the item
                      was received by or sent by the user.
     :ivar conversation_id: Stable thread/conversation identifier from the source

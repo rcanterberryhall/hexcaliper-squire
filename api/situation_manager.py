@@ -160,7 +160,11 @@ def _update_situation_record(sit_id: str, item_ids: list) -> None:
                                for r in (json.loads(raw) if isinstance(raw, str) and raw else (raw or []))))
         sources     = list(set(r.get("source", "") for r in cluster_records))
         last_ts     = max((r.get("timestamp", "") for r in cluster_records), default=now_iso())
-        proj_tags   = list(set(r.get("project_tag") for r in cluster_records if r.get("project_tag")))
+        # Collect all project tags across cluster members (handles multi-tag)
+        all_proj = set()
+        for r in cluster_records:
+            all_proj.update(db.parse_project_tags(r.get("project_tag")))
+        proj_tag_val = db.serialize_project_tags(sorted(all_proj)) if all_proj else None
 
         updates = {
             "item_ids":         item_ids,
@@ -174,7 +178,7 @@ def _update_situation_record(sit_id: str, item_ids: list) -> None:
             "key_context":      synthesis.get("key_context"),
             "references":       all_refs,
             "last_updated":     last_ts,
-            "project_tag":      proj_tags[0] if len(proj_tags) == 1 else None,
+            "project_tag":      proj_tag_val,
             "score_updated_at": now_iso(),
         }
         with db.lock:
@@ -189,12 +193,7 @@ def _sync_situation_tags_for_item(item_id: str) -> None:
     """
     Recompute ``project_tag`` on every situation that contains ``item_id``.
 
-    Lightweight — no LLM call.  Mirrors the consensus rule used in
-    ``_update_situation_record``: set the tag only when *all* member analyses
-    agree on the same non-null tag, otherwise set it to ``None``.
-
-    Called synchronously after any endpoint that changes a single analysis's
-    ``project_tag``.
+    Collects the union of all member project tags (multi-tag aware).
 
     :param item_id: Stable ID of the analysis whose tag just changed.
     :type item_id: str
@@ -207,8 +206,10 @@ def _sync_situation_tags_for_item(item_id: str) -> None:
         with db.lock:
             members = [db.get_item(iid) for iid in mem_ids]
         members   = [m for m in members if m]
-        proj_tags = list({m.get("project_tag") for m in members if m.get("project_tag")})
-        new_tag   = proj_tags[0] if len(proj_tags) == 1 else None
+        all_tags  = set()
+        for m in members:
+            all_tags.update(db.parse_project_tags(m.get("project_tag")))
+        new_tag = db.serialize_project_tags(sorted(all_tags)) if all_tags else None
         if new_tag != sit.get("project_tag"):
             with db.lock:
                 db.update_situation(sit_id, {"project_tag": new_tag})
@@ -219,8 +220,7 @@ def _sync_situation_tags_all() -> None:
     Recompute ``project_tag`` on every situation.
 
     Called after a bulk project-tag change (e.g. project deletion in
-    ``save_settings``).  Uses the same consensus rule as
-    ``_sync_situation_tags_for_item``.
+    ``save_settings``).  Multi-tag aware — collects union of member tags.
     """
     with db.lock:
         all_sits = db.get_all_situations(include_dismissed=True)
@@ -230,8 +230,10 @@ def _sync_situation_tags_all() -> None:
         with db.lock:
             members = [db.get_item(iid) for iid in mem_ids]
         members   = [m for m in members if m]
-        proj_tags = list({m.get("project_tag") for m in members if m.get("project_tag")})
-        new_tag   = proj_tags[0] if len(proj_tags) == 1 else None
+        all_tags  = set()
+        for m in members:
+            all_tags.update(db.parse_project_tags(m.get("project_tag")))
+        new_tag = db.serialize_project_tags(sorted(all_tags)) if all_tags else None
         if new_tag != sit.get("project_tag"):
             with db.lock:
                 db.update_situation(sit_id, {"project_tag": new_tag})
@@ -341,7 +343,10 @@ def _maybe_form_situation(item_id: str) -> None:
         all_refs    = list(set(r for rec in cluster_records
                                for raw in [rec.get("references")]
                                for r in (json.loads(raw) if isinstance(raw, str) and raw else (raw or []))))
-        project_tags = list(set(r.get("project_tag") for r in cluster_records if r.get("project_tag")))
+        all_proj = set()
+        for r in cluster_records:
+            all_proj.update(db.parse_project_tags(r.get("project_tag")))
+        proj_tag_val = db.serialize_project_tags(sorted(all_proj)) if all_proj else None
         sources      = list(set(r.get("source", "") for r in cluster_records))
         last_ts      = max((r.get("timestamp", "") for r in cluster_records), default=now_iso())
 
@@ -353,7 +358,7 @@ def _maybe_form_situation(item_id: str) -> None:
             "status":           synthesis.get("status", "in_progress"),
             "item_ids":         all_ids,
             "sources":          sources,
-            "project_tag":      project_tags[0] if len(project_tags) == 1 else None,
+            "project_tag":      proj_tag_val,
             "score":            score,
             "priority":         max_pri.get("priority", "medium"),
             "open_actions":     synthesis.get("open_actions", []),

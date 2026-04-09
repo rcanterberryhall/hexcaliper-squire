@@ -43,6 +43,8 @@ import secrets
 import time
 import threading
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
 _req_log = logging.getLogger("parsival.requests")
 _log = logging.getLogger("parsival")
 import psutil as _psutil
@@ -886,7 +888,8 @@ def patch_analysis(item_id: str, body: dict, background_tasks: BackgroundTasks):
     if "task_type" in body and body["task_type"] in allowed_task_types:
         updates["task_type"] = body["task_type"]
     if "project_tag" in body:
-        updates["project_tag"] = body["project_tag"] or None
+        val = body["project_tag"]
+        updates["project_tag"] = db.serialize_project_tags(val) if val else None
     if "is_passdown" in body and isinstance(body["is_passdown"], bool):
         updates["is_passdown"] = 1 if body["is_passdown"] else 0
     if not updates:
@@ -992,15 +995,20 @@ def tag_item(item_id: str, body: TagRequest, background_tasks: BackgroundTasks):
     if not any(p.get("name") == project_name for p in config.PROJECTS):
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Update the stored analysis and any associated intel rows immediately
+    # Add the project to existing tags (merge, don't replace)
     with db.lock:
+        existing_tags = db.parse_project_tags(record.get("project_tag"))
+        if project_name not in existing_tags:
+            existing_tags.append(project_name)
+        new_tag_val = db.serialize_project_tags(existing_tags)
+
         edited = set(json.loads(record.get("user_edited_fields") or "[]"))
         edited.add("project_tag")
         db.update_item(item_id, {
-            "project_tag": project_name,
+            "project_tag": new_tag_val,
             "user_edited_fields": json.dumps(sorted(edited)),
         })
-        db.update_intel_project(item_id, project_name)
+        db.update_intel_project(item_id, new_tag_val)
     situation_manager._sync_situation_tags_for_item(item_id)
 
     def learn() -> None:
@@ -1272,9 +1280,17 @@ def save_settings(body: dict):
         if removed_projects:
             for name in removed_projects:
                 db.update_items_by_project(name, {"project_tag": None})
-                db.conn().execute(
-                    "UPDATE intel SET project_tag = NULL WHERE project_tag = ?", (name,)
-                )
+                # Clear from intel rows too
+                for row in db.conn().execute(
+                    "SELECT id, project_tag FROM intel WHERE project_tag = ? OR project_tag LIKE ?",
+                    (name, f'%"{name}"%'),
+                ).fetchall():
+                    tags = db.parse_project_tags(row["project_tag"])
+                    tags = [t for t in tags if t != name]
+                    db.conn().execute(
+                        "UPDATE intel SET project_tag = ? WHERE id = ?",
+                        (tags[0] if tags else None, row["id"]),
+                    )
             situation_manager._sync_situation_tags_all()
 
     config.apply_overrides(existing)
@@ -1652,7 +1668,7 @@ def get_intel(
     if source:
         results = [r for r in results if r.get("source") == source]
     if project:
-        results = [r for r in results if r.get("project_tag") == project]
+        results = [r for r in results if project in db.parse_project_tags(r.get("project_tag"))]
     results.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
     for r in results:
         r["doc_id"] = r["id"]
@@ -1710,28 +1726,41 @@ def _build_briefing() -> dict:
     cutoff = last["generated_at"] if last else "1970-01-01T00:00:00+00:00"
 
     # Collect project tags with activity since last briefing.
-    active_projects: set[str | None] = set()
+    active_projects: set[str] = set()
+    has_untagged = False
     for i in all_intel:
         if (i.get("created_at") or "") > cutoff:
-            active_projects.add(i.get("project_tag"))
+            tags = db.parse_project_tags(i.get("project_tag"))
+            if tags:
+                active_projects.update(tags)
+            else:
+                has_untagged = True
     for s in all_sits:
         if (s.get("last_updated") or "") > cutoff:
-            active_projects.add(s.get("project_tag"))
+            tags = db.parse_project_tags(s.get("project_tag"))
+            if tags:
+                active_projects.update(tags)
+            else:
+                has_untagged = True
     for t in all_todos:
         if (t.get("created_at") or "") > cutoff:
             item = next((a for a in all_items if a.get("item_id") == t.get("item_id")), {})
-            active_projects.add(item.get("project_tag"))
+            tags = db.parse_project_tags(item.get("project_tag"))
+            if tags:
+                active_projects.update(tags)
+            else:
+                has_untagged = True
 
     sections = []
-    for project in sorted(p for p in active_projects if p):  # named projects first
-        intel_facts  = [i["fact"] for i in all_intel    if i.get("project_tag") == project]
+    for project in sorted(active_projects):
+        intel_facts  = [i["fact"] for i in all_intel    if project in db.parse_project_tags(i.get("project_tag"))]
         sit_lines    = [f"{s['title']} ({s.get('status','')}"
                         f"{' — score '+str(round(s['score'],1)) if s.get('score') else ''})"
-                        for s in all_sits if s.get("project_tag") == project]
-        item_ids     = {a["item_id"] for a in all_items if a.get("project_tag") == project}
+                        for s in all_sits if project in db.parse_project_tags(s.get("project_tag"))]
+        item_ids     = {a["item_id"] for a in all_items if db.item_has_project(a, project)}
         todo_descs   = [t["description"] for t in all_todos if t.get("item_id") in item_ids]
         sit_refs     = [{"situation_id": s["situation_id"], "title": s["title"]}
-                        for s in all_sits if s.get("project_tag") == project]
+                        for s in all_sits if project in db.parse_project_tags(s.get("project_tag"))]
         todo_refs    = [{"doc_id": t["id"], "description": t["description"],
                          "priority": t.get("priority","medium")}
                         for t in all_todos if t.get("item_id") in item_ids]
@@ -1745,14 +1774,14 @@ def _build_briefing() -> dict:
         })
 
     # Untagged pool — only if active.
-    if None in active_projects:
-        untagged_items = {a["item_id"] for a in all_items if not a.get("project_tag")}
-        intel_facts  = [i["fact"] for i in all_intel  if not i.get("project_tag")]
+    if has_untagged:
+        untagged_items = {a["item_id"] for a in all_items if not db.item_has_any_project(a)}
+        intel_facts  = [i["fact"] for i in all_intel  if not db.parse_project_tags(i.get("project_tag"))]
         sit_lines    = [f"{s['title']} ({s.get('status','')})"
-                        for s in all_sits if not s.get("project_tag")]
+                        for s in all_sits if not db.parse_project_tags(s.get("project_tag"))]
         todo_descs   = [t["description"] for t in all_todos if t.get("item_id") in untagged_items]
         sit_refs     = [{"situation_id": s["situation_id"], "title": s["title"]}
-                        for s in all_sits if not s.get("project_tag")]
+                        for s in all_sits if not db.parse_project_tags(s.get("project_tag"))]
         todo_refs    = [{"doc_id": t["id"], "description": t["description"],
                          "priority": t.get("priority","medium")}
                         for t in all_todos if t.get("item_id") in untagged_items]
@@ -1866,9 +1895,9 @@ def get_analyses(
     if hierarchy:
         results = [a for a in results if a.get("hierarchy") == hierarchy]
     if project == "__none__":
-        results = [a for a in results if not a.get("project_tag")]
+        results = [a for a in results if not db.item_has_any_project(a)]
     elif project:
-        results = [a for a in results if a.get("project_tag") == project]
+        results = [a for a in results if db.item_has_project(a, project)]
     if q:
         ql = q.lower()
         results = [a for a in results if any(
@@ -1938,7 +1967,7 @@ def get_situations(
         all_sits = [s for s in all_sits if s.get("lifecycle_status", "new") in allowed]
 
     if project:
-        all_sits = [s for s in all_sits if s.get("project_tag") == project]
+        all_sits = [s for s in all_sits if project in db.parse_project_tags(s.get("project_tag"))]
     if status:
         all_sits = [s for s in all_sits if s.get("status") == status]
     if min_score:

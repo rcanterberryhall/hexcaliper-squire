@@ -30,7 +30,7 @@ Key helpers:
     ``_strip_caution(body)`` — removes the standardised external-sender
         CAUTION warning header from email bodies before storage and prompt
         construction (matched by ``_CAUTION_PATTERN``).
-    ``_validated_project_tag(tag)`` — validates an LLM-returned project tag
+    ``_validated_project_tags(tags)`` — validates LLM-returned project tag(s)
         against the configured project list, returning ``None`` for invented
         names.
     ``extract_keywords(project_name, title, body)`` — calls the LLM to extract
@@ -43,6 +43,7 @@ import re
 import requests
 from models import RawItem, Analysis, ActionItem
 import config
+import db
 import llm
 
 log = logging.getLogger(__name__)
@@ -82,7 +83,7 @@ Respond ONLY with valid JSON. No explanation, no markdown fences.
   "task_type": one of ["reply", "review", null],
   "hierarchy": one of ["user", "project", "topic", "general"],
   "is_passdown": true or false,
-  "project_tag": "exact project name from the active projects list above, or null if none match — do NOT invent names from email content; prefer the most specific sub-project over its parent when both could match",
+  "project_tags": ["exact project name(s) from the active projects list above — one or more tags allowed; use an empty list [] if none match; do NOT invent names; prefer the most specific sub-project, but if the item spans multiple projects (e.g. a passdown covering several sub-projects), list ALL relevant projects"],
   "action_items": [
     {{
       "description": "specific concrete action",
@@ -103,7 +104,7 @@ Respond ONLY with valid JSON. No explanation, no markdown fences.
       "relevance": "why this matters — project context, current state, or background"
     }}
   ],
-  "summary": "one sentence — what this is and what needs to happen",
+  "summary": "one sentence — what this is and what needs to happen. NEVER repeat the subject line verbatim; if body is empty or trivial, write 'No actionable content.'",
   "urgency_reason": "why this priority, or null"
 }}
 
@@ -125,6 +126,8 @@ Passdown — is_passdown=true ONLY when:
 - The opening lines contain a phrase like "notes from [shift] shift" (e.g. "notes from 2nd shift", "notes from first shift")
 - These are shift-handoff emails from operational teams; they describe ongoing work, current system state, and items to watch
 - For passdowns: extract action items ONLY when explicitly directed at {user_name}; otherwise has_action=false
+- Passdowns are NEVER category="noise" — they are operational documents. Use category="fyi" unless a specific task for {user_name} is called out
+- When a passdown covers multiple sub-projects, list ALL relevant projects in project_tags (e.g. ["P905", "Seatbelts upgrades", "Transformer upgrade"])
 
 Goals — extract genuine project objectives or milestones stated in the content (not individual tasks).
 
@@ -588,25 +591,28 @@ def _strip_caution(body: str) -> str:
     return _CAUTION_PATTERN.sub('', body).lstrip()
 
 
-def _validated_project_tag(tag: str | None) -> str | None:
+def _validated_project_tags(tags) -> list[str]:
     """
-    Validate an LLM-returned project tag against the configured project list.
+    Validate LLM-returned project tags against the configured project list.
 
-    Prevents the LLM from inventing project names that don't exist in
-    ``config.PROJECTS``.  If ``tag`` exactly matches a configured project name
-    it is returned unchanged; otherwise ``None`` is returned.  When
-    ``config.PROJECTS`` is empty, any tag passes through (no list to validate
-    against).
+    Accepts a single string, a list of strings, or None.  Returns a list of
+    validated project names (only those that exist in ``config.PROJECTS``).
+    When ``config.PROJECTS`` is empty, all tags pass through.
 
-    :param tag: Project name returned by the LLM, or ``None``.
-    :type tag: str or None
-    :return: The validated tag, or ``None`` if it doesn't match any project.
-    :rtype: str or None
+    :param tags: Project name(s) returned by the LLM.
+    :return: List of validated project names (may be empty).
+    :rtype: list[str]
     """
-    if not tag or not config.PROJECTS:
-        return tag
+    if not tags:
+        return []
+    if isinstance(tags, str):
+        tags = [tags]
+    if not isinstance(tags, list):
+        return []
+    if not config.PROJECTS:
+        return [t for t in tags if isinstance(t, str) and t]
     valid = {p.get("name") for p in config.PROJECTS}
-    return tag if tag in valid else None
+    return [t for t in tags if isinstance(t, str) and t in valid]
 
 
 def build_prompt(item: RawItem) -> str:
@@ -644,7 +650,7 @@ def build_prompt(item: RawItem) -> str:
         manual_tag_hint = (
             f"\n- Manual project tag: the user has tagged this item to project "
             f"\"{_manual_tag}\". Treat this as a strong signal for project_tag "
-            f"and hierarchy assignment."
+            f"and hierarchy assignment. Include it in project_tags."
         )
     else:
         manual_tag_hint = ""
@@ -777,7 +783,7 @@ def analyze(item: RawItem) -> Analysis:
         manual_tag_hint = (
             f"\n- Manual project tag: the user has tagged this item to project "
             f"\"{_manual_tag}\". Treat this as a strong signal for project_tag "
-            f"and hierarchy assignment."
+            f"and hierarchy assignment. Include it in project_tags."
         )
     else:
         manual_tag_hint = ""
@@ -915,8 +921,12 @@ def analyze(item: RawItem) -> Analysis:
         urgency_reason    = data.get("urgency_reason"),
         hierarchy         = data.get("hierarchy", item.metadata.get("hierarchy", "general")),
         is_passdown       = _detect_passdown(item.title, item.body) or bool(data.get("is_passdown", False)),
-        project_tag       = _validated_project_tag(
-                               data.get("project_tag") or item.metadata.get("project_tag")
+        project_tag       = db.serialize_project_tags(
+                               _validated_project_tags(
+                                   data.get("project_tags")
+                                   or data.get("project_tag")
+                                   or item.metadata.get("project_tag")
+                               )
                            ),
         direction         = item.metadata.get("direction", "received"),
         conversation_id   = item.metadata.get("conversation_id"),

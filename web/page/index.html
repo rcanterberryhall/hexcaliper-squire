@@ -330,10 +330,15 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 /* ── Seed results ── */
 .seed-section { margin-top: 14px; }
 .seed-section-head { font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
-.seed-project-row { display: flex; align-items: flex-start; gap: 6px; margin-bottom: 6px; }
-.seed-project-row input { flex: 1; background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: 3px; padding: 4px 6px; font-size: 11px; }
-.seed-project-row textarea { flex: 2; background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: 3px; padding: 4px 6px; font-size: 11px; resize: none; height: 34px; }
+.seed-project-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 6px; margin-bottom: 10px; padding: 8px; background: var(--card); border: 1px solid var(--border); border-radius: 4px; }
+.seed-project-row input, .seed-project-row textarea, .seed-project-row select { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 3px; padding: 4px 6px; font-size: 11px; }
+.seed-project-row input:focus, .seed-project-row textarea:focus, .seed-project-row select:focus { border-color: var(--accent); }
+.seed-project-row textarea { resize: vertical; min-height: 40px; }
+.seed-project-row select { appearance: none; cursor: pointer; }
 .seed-project-row .ia { flex-shrink: 0; }
+.seed-project-row .sp-col1 { display: flex; flex-direction: column; gap: 4px; }
+.seed-project-row .sp-col2 { display: flex; flex-direction: column; gap: 4px; }
+.seed-project-row .sp-del { align-self: start; }
 .seed-topic-chip { display:inline-flex;align-items:center;gap:4px;background:rgba(64,184,255,.08);border:1px solid rgba(64,184,255,.2);color:var(--blue);border-radius:12px;padding:2px 8px;font-size:10px;margin:2px; }
 .seed-topic-chip button { background:none;border:none;color:var(--muted);cursor:pointer;padding:0;line-height:1; }
 
@@ -1317,15 +1322,14 @@ function showProjectPicker(itemId, anchorEl) {
   const picker = document.createElement('div');
   picker.className = 'project-picker';
   picker.dataset.itemId = String(itemId);
-  const currentTag = (findAnalysis(String(itemId)) || allTodos.find(t => (t.item_id || String(t.doc_id)) === String(itemId)))?.project_tag;
-  const removeOpt  = currentTag
-    ? `<button style="color:var(--muted)" onclick="removeProjectTag('${esc(String(itemId))}',event)">✕ Remove tag</button>` : '';
-  if (!allProjects.length && !currentTag) {
+  const currentTags = parseTags((findAnalysis(String(itemId)) || allTodos.find(t => (t.item_id || String(t.doc_id)) === String(itemId)))?.project_tag);
+  if (!allProjects.length && !currentTags.length) {
     picker.innerHTML = '<div class="no-projects">No projects configured</div>';
   } else {
-    picker.innerHTML = removeOpt + allProjects.map(p =>
-      `<button onclick="tagToProject('${esc(p.name)}','${esc(String(itemId))}',event)">${esc(p.name)}</button>`
-    ).join('');
+    picker.innerHTML = allProjects.map(p => {
+      const tagged = currentTags.includes(p.name);
+      return `<button onclick="${tagged ? `untagProject('${esc(p.name)}','${esc(String(itemId))}',event)` : `tagToProject('${esc(p.name)}','${esc(String(itemId))}',event)`}">${tagged ? '✓ ' : ''}${esc(p.name)}</button>`;
+    }).join('');
   }
   const rect = anchorEl.getBoundingClientRect();
   picker.style.top  = (rect.bottom + 4) + 'px';
@@ -1352,15 +1356,16 @@ async function tagToProject(projectName, itemId, evt) {
   }
 }
 
-async function removeProjectTag(itemId, evt) {
+async function untagProject(projectName, itemId, evt) {
   evt.stopPropagation();
   dismissPicker();
   try {
-    await api(`/analyses/${encodeURIComponent(itemId)}`, 'PATCH', { project_tag: null });
     const a = findAnalysis(itemId);
-    if (a) a.project_tag = null;
+    const tags = parseTags(a?.project_tag).filter(t => t !== projectName);
+    await api(`/analyses/${encodeURIComponent(itemId)}`, 'PATCH', { project_tag: tags.length ? tags : null });
+    if (a) a.project_tag = tags.length === 1 ? tags[0] : tags.length ? JSON.stringify(tags) : null;
     await Promise.all([loadTodos(), loadItems()]);
-    $('statusMsg').textContent = 'Project tag removed.';
+    $('statusMsg').textContent = `Removed ${projectName} tag.`;
     if ($('detailPanel').classList.contains('open') && a) openDetail(a);
   } catch(e) {
     $('statusMsg').textContent = 'Remove failed: ' + e.message;
@@ -1426,6 +1431,21 @@ function setStatus(state) {
   word.textContent = state.toUpperCase();
 }
 const esc = s  => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+/** Parse project_tag column (string, JSON array string, or null) into a list */
+function parseTags(v) {
+  if (!v) return [];
+  if (Array.isArray(v)) return v.filter(Boolean);
+  v = String(v).trim();
+  if (v.startsWith('[')) { try { const a = JSON.parse(v); return Array.isArray(a) ? a.filter(Boolean) : [v]; } catch { return [v]; } }
+  return [v];
+}
+/** Check whether an item is tagged to a given project */
+function hasTag(item, proj) { return parseTags(item.project_tag).includes(proj); }
+/** Check whether an item has any project tag */
+function hasAnyTag(item) { return parseTags(item.project_tag).length > 0; }
+/** Render project badge(s) for an item */
+function projBadges(item) { return parseTags(item.project_tag).map(t => `<span class="badge b-project" style="margin-left:4px">${esc(t)}</span>`).join(''); }
 const trunc   = (s, n) => s.length > n ? s.slice(0, n) + '…' : s;
 const fmtDate = iso => { try { return new Date(iso).toLocaleDateString([], {month:'short', day:'numeric'}); } catch { return iso; }};
 const fmtTime = iso => { try { return new Date(iso).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); } catch { return iso; }};
@@ -1650,7 +1670,7 @@ function makeTodo(t) {
   const tagBtn = allProjects.length ? `<button class="ia" onclick="showProjectPicker('${esc(t.item_id || String(t.doc_id))}',this)" title="Tag to project">◈</button>` : '';
   const analysis  = allAnalyses.find(a => a.item_id === t.item_id);
   const projTag   = t.project_tag || analysis?.project_tag;
-  const proj      = projTag ? `<span class="chip"><span class="badge b-project">${esc(projTag)}</span></span>` : '';
+  const proj      = parseTags(projTag).map(t => `<span class="chip"><span class="badge b-project">${esc(t)}</span></span>`).join('');
   const catKey    = analysis ? (analysis.task_type ? `task-${analysis.task_type}` : (analysis.category || 'fyi')) : null;
   const catLabel  = analysis ? (analysis.task_type ? `task · ${analysis.task_type}` : (analysis.category || 'fyi')) : null;
   const catBadge  = catKey ? `<span class="badge b-${catKey}">${catLabel}</span>` : '';
@@ -1817,8 +1837,8 @@ function renderSidebarProjects(items) {
   const list = $('project-filter-list');
   if (!list) return;
   const counts = {};
-  (items || allAnalyses).forEach(a => { if (a.project_tag) counts[a.project_tag] = (counts[a.project_tag] || 0) + 1; });
-  const untaggedCount = (items || allAnalyses).filter(a => !a.project_tag).length;
+  (items || allAnalyses).forEach(a => { for (const t of parseTags(a.project_tag)) counts[t] = (counts[t] || 0) + 1; });
+  const untaggedCount = (items || allAnalyses).filter(a => !hasAnyTag(a)).length;
   let html = `<div class="srow ${projectFilter === 'all' ? 'active-all' : ''}" onclick="setProject('all',this)">
     <div class="sdot sdot-all"></div><span style="font-size:12px">All</span><span class="sc">${(items || allAnalyses).length}</span></div>`;
   allProjects.forEach(p => {
@@ -1844,8 +1864,8 @@ function renderItems(items) {
   if (!showHidden)                  filtered = filtered.filter(i => i.category !== 'noise');
   if (typeFilter === 'passdown')    filtered = filtered.filter(i => i.is_passdown);
   if (hierarchyFilter !== 'all')   filtered = filtered.filter(i => i.hierarchy === hierarchyFilter);
-  if (projectFilter === '__none__') filtered = filtered.filter(i => !i.project_tag);
-  else if (projectFilter !== 'all') filtered = filtered.filter(i => i.project_tag === projectFilter);
+  if (projectFilter === '__none__') filtered = filtered.filter(i => !hasAnyTag(i));
+  else if (projectFilter !== 'all') filtered = filtered.filter(i => hasTag(i, projectFilter));
   if (dateFilter !== 'all') {
     const cutoff = new Date(Date.now() - parseInt(dateFilter) * 86400000).toISOString();
     filtered = filtered.filter(i => (i.timestamp || '') >= cutoff);
@@ -1895,7 +1915,7 @@ function itemRow(i) {
   const catLabel = i.task_type ? `task · ${i.task_type}` : (i.category || 'fyi');
   const isNoise = i.category === 'noise';
   const pd      = i.is_passdown ? `<span class="badge b-passdown" style="margin-left:4px">passdown</span>` : '';
-  const proj    = i.project_tag ? `<span class="badge b-project" style="margin-left:4px">${esc(i.project_tag)}</span>` : '';
+  const proj    = projBadges(i);
   const tagCell = `<td style="white-space:nowrap" onclick="event.stopPropagation()">
     ${isNoise
       ? `<button class="restore-btn" onclick="event.stopPropagation();restoreItem('${esc(i.item_id)}')" title="Restore item">↩ restore</button>`
@@ -2080,7 +2100,7 @@ function renderSituations(situations) {
   let visible = situations; // server already filtered by lifecycle_status
   if (projectFilter !== 'all') {
     visible = visible.filter(s =>
-      projectFilter === '__none__' ? !s.project_tag : s.project_tag === projectFilter
+      projectFilter === '__none__' ? !hasAnyTag(s) : hasTag(s, projectFilter)
     );
   }
   if (sortBy === 'newest')   visible.sort((a,b) => (b.last_updated||'').localeCompare(a.last_updated||''));
@@ -2102,7 +2122,7 @@ function situationCard(s) {
     `<div class="sit-src-dot" style="background:${srcColors[src]||'var(--muted)'}" title="${src}"></div>`
   ).join('');
   const priLabel    = `<span class="badge b-${s.priority||'low'}">${s.priority||'low'}</span>`;
-  const projLabel   = s.project_tag ? `<span class="badge b-project">${esc(s.project_tag)}</span>` : '';
+  const projLabel   = projBadges(s);
   const statusLabel = `<span class="sit-detail-status status-${s.status||'informational'}">${(s.status||'informational').replace('_',' ')}</span>`;
   const actions     = (s.open_actions||[]).filter(a => a.owner === 'me' || a.owner === 'Me');
   const actLine     = actions.length
@@ -2514,7 +2534,7 @@ function openDetail(item) {
     item.category ? `<span class="badge b-${item.task_type ? 'task-'+item.task_type : item.category}">${item.task_type ? 'task · '+item.task_type : item.category}</span>` : '',
     `<span class="badge" style="background:rgba(110,80,80,.1);border:1px solid var(--border);color:var(--muted)">${item.priority || 'low'}</span>`,
     item.hierarchy ? `<span class="badge" style="background:rgba(110,80,80,.1);border:1px solid var(--border);color:var(--muted)">${item.hierarchy}</span>` : '',
-    item.project_tag  ? `<span class="badge b-project">${esc(item.project_tag)}</span>` : '',
+    projBadges(item),
     item.is_passdown  ? `<span class="badge b-passdown">passdown</span>` : '',
     item.is_replied   ? `<span class="badge" style="background:rgba(64,184,255,.08);border:1px solid rgba(64,184,255,.2);color:var(--blue)">↩ replied</span>` : '',
   ].filter(Boolean).join('');
@@ -2600,10 +2620,13 @@ function openDetail(item) {
     `<option value="${v}"${v === item.category ? ' selected' : ''}>${v}</option>`).join('');
   const taskTypeOpts = [['','— none —'],['reply','reply'],['review','review']].map(([v,l]) =>
     `<option value="${v}"${(item.task_type||'') === v ? ' selected' : ''}>${l}</option>`).join('');
-  const projOpts = [`<option value="">— none —</option>`]
-    .concat(allProjects.map(p =>
-      `<option value="${esc(p.name)}"${p.name === item.project_tag ? ' selected' : ''}>${esc(p.name)}</option>`))
-    .join('');
+  const itemTags = parseTags(item.project_tag);
+  const projChecks = allProjects.map(p =>
+    `<label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">
+       <input type="checkbox" class="detailProjCb" value="${esc(p.name)}" ${itemTags.includes(p.name) ? 'checked' : ''}>
+       ${esc(p.name)}
+     </label>`
+  ).join('');
   $('detailEdit').innerHTML = `
     <label>Priority</label>
     <select class="detail-select" id="detailPri">${priOpts}</select>
@@ -2611,8 +2634,8 @@ function openDetail(item) {
     <select class="detail-select" id="detailCat">${catOpts}</select>
     <label>Task type</label>
     <select class="detail-select" id="detailTaskType">${taskTypeOpts}</select>
-    <label>Project</label>
-    <select class="detail-select" id="detailProj">${projOpts}</select>
+    <label>Projects</label>
+    <div id="detailProj" style="display:flex;flex-direction:column;gap:2px;padding:4px 0">${projChecks}</div>
     <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
       <input type="checkbox" id="detailPassdown" ${item.is_passdown ? 'checked' : ''}>
       Passdown
@@ -2694,17 +2717,18 @@ async function saveDetailEdits(itemId) {
   const pri        = $('detailPri').value;
   const cat        = $('detailCat').value;
   const taskType   = $('detailTaskType')?.value || null;
-  const proj       = $('detailProj')?.value ?? undefined;
+  const projCbs    = document.querySelectorAll('.detailProjCb:checked');
+  const projTags   = Array.from(projCbs).map(cb => cb.value);
   const isPassdown = $('detailPassdown')?.checked;
   const msg        = $('detailSaveMsg');
   const body = { priority: pri, category: cat, task_type: taskType, is_passdown: isPassdown };
-  if (proj !== undefined) body.project_tag = proj || null;
+  body.project_tag = projTags.length ? projTags : null;
   try {
     await api(`/analyses/${encodeURIComponent(itemId)}`, 'PATCH', body);
     const a = findAnalysis(itemId);
     if (a) {
       a.priority = pri; a.category = cat; a.task_type = taskType; a.is_passdown = isPassdown;
-      if (proj !== undefined) a.project_tag = proj || null;
+      a.project_tag = projTags.length ? (projTags.length === 1 ? projTags[0] : JSON.stringify(projTags)) : null;
     }
     renderItems(allAnalyses);
     loadTodos();
@@ -3002,7 +3026,7 @@ async function openSeed() {
   try {
     const st = await api('/seed/status', 'GET');
     // 'idle' = never started; show the start screen instead of the word "idle"
-    if (!st.state || st.state === 'idle') st.state = 'start';
+    if (!st.state || st.state === 'idle' || st.state === 'done') st.state = 'start';
     renderSeedState(st);
     if (!['idle', 'done', 'error', 'start', 'review'].includes(st.state)) {
       startSeedPolling();
@@ -3084,7 +3108,7 @@ function renderSeedState(st) {
       const projects = st.projects || [];
       const topics   = st.topics   || [];
       let html = `<p style="margin:0 0 10px;font-size:12px;color:var(--muted)">
-        Review the suggested projects and topics. Edit or remove any before applying.</p>`;
+        Review the suggested projects and topics. Edit names, descriptions, keywords, parent, and senders before applying.</p>`;
 
       html += `<div class="seed-section">
         <div class="seed-section-head">Suggested Projects (${projects.length})</div>
@@ -3093,14 +3117,25 @@ function renderSeedState(st) {
         html += `<div style="font-size:11px;color:var(--muted)">No projects identified.</div>`;
       } else {
         projects.forEach((p, i) => {
-          html += `<div class="seed-project-row">
-            <input id="sp-name-${i}" value="${esc(p.name)}" placeholder="Project name">
-            <textarea id="sp-kw-${i}" placeholder="keywords, comma separated">${esc((p.keywords||[]).join(', '))}</textarea>
-            <button class="ia del" onclick="this.closest('.seed-project-row').remove()">✕</button>
+          html += `<div class="seed-project-row" data-idx="${i}">
+            <div class="sp-col1">
+              <input class="sp-name" value="${esc(p.name)}" placeholder="Project name" oninput="_refreshSeedParents()">
+              <select class="sp-parent" title="Parent project (optional)">
+                <option value="">— no parent —</option>
+              </select>
+              <input class="sp-senders" value="${esc((p.senders||[]).join(', '))}" placeholder="known senders (comma separated)">
+            </div>
+            <div class="sp-col2">
+              <textarea class="sp-desc" placeholder="Short description of scope, location, or purpose…">${esc(p.description || '')}</textarea>
+              <input class="sp-kw" value="${esc((p.keywords||[]).join(', '))}" placeholder="keywords (comma separated)">
+            </div>
+            <button class="ia del sp-del" onclick="this.closest('.seed-project-row').remove(); _refreshSeedParents()">✕</button>
           </div>`;
         });
       }
-      html += `</div></div>`;
+      html += `</div>
+        <button class="connect-btn" style="margin-top:6px" onclick="addSeedProjectRow()">+ Add Project</button>
+      </div>`;
 
       html += `<div class="seed-section" style="margin-top:14px">
         <div class="seed-section-head">Suggested Topics (${topics.length})</div>
@@ -3115,6 +3150,14 @@ function renderSeedState(st) {
       html += `</div></div>`;
 
       body.innerHTML = html;
+      // Populate parent dropdowns with stored parent values
+      if (projects.length) {
+        const rows = document.querySelectorAll('#seedProjectList .seed-project-row');
+        projects.forEach((p, i) => {
+          if (p.parent && rows[i]) rows[i].dataset.parentVal = p.parent;
+        });
+        _refreshSeedParents();
+      }
       foot.innerHTML = `
         <button class="btn" onclick="closeSeed()">Cancel</button>
         <button class="btn primary" onclick="applySeedConfig()">Apply &amp; Re-analyse</button>`;
@@ -3192,12 +3235,12 @@ async function applySeedConfig() {
   const projectRows = document.querySelectorAll('#seedProjectList .seed-project-row');
   const projects = [];
   projectRows.forEach(row => {
-    const nameEl = row.querySelector('input');
-    const kwEl   = row.querySelector('textarea');
-    if (!nameEl || !kwEl) return;
-    const name = nameEl.value.trim();
-    const kws  = kwEl.value.split(',').map(s => s.trim()).filter(Boolean);
-    if (name) projects.push({ name, keywords: kws });
+    const name    = (row.querySelector('.sp-name')    || {}).value?.trim() || '';
+    const parent  = (row.querySelector('.sp-parent')  || {}).value?.trim() || '';
+    const desc    = (row.querySelector('.sp-desc')    || {}).value?.trim() || '';
+    const kws     = ((row.querySelector('.sp-kw')     || {}).value || '').split(',').map(s => s.trim()).filter(Boolean);
+    const senders = ((row.querySelector('.sp-senders') || {}).value || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (name) projects.push({ name, parent, description: desc, keywords: kws, senders });
   });
   const topicChips = document.querySelectorAll('#seedTopicList .seed-topic-chip');
   const topics = Array.from(topicChips).map(c => c.textContent.replace('✕','').trim()).filter(Boolean);
@@ -3211,6 +3254,44 @@ async function applySeedConfig() {
   } catch(e) {
     renderSeedState({ state: 'error', progress: e.message });
   }
+}
+
+function _refreshSeedParents() {
+  const rows  = Array.from(document.querySelectorAll('#seedProjectList .seed-project-row'));
+  const names = rows.map(r => (r.querySelector('.sp-name') || {}).value || '').filter(Boolean);
+  rows.forEach(row => {
+    const sel     = row.querySelector('.sp-parent');
+    const current = sel.value || row.dataset.parentVal || '';
+    sel.innerHTML = '<option value="">— no parent —</option>'
+      + names.filter(n => n !== ((row.querySelector('.sp-name') || {}).value || ''))
+             .map(n => `<option value="${esc(n)}" ${n === current ? 'selected' : ''}>${esc(n)}</option>`)
+             .join('');
+    row.dataset.parentVal = '';
+  });
+}
+
+function addSeedProjectRow(p = {}) {
+  const list = document.getElementById('seedProjectList');
+  const idx  = list.querySelectorAll('.seed-project-row').length;
+  const div  = document.createElement('div');
+  div.className = 'seed-project-row';
+  div.dataset.idx = idx;
+  div.innerHTML = `
+    <div class="sp-col1">
+      <input class="sp-name" value="${esc(p.name || '')}" placeholder="Project name" oninput="_refreshSeedParents()">
+      <select class="sp-parent" title="Parent project (optional)">
+        <option value="">— no parent —</option>
+      </select>
+      <input class="sp-senders" value="${esc((p.senders||[]).join(', '))}" placeholder="known senders (comma separated)">
+    </div>
+    <div class="sp-col2">
+      <textarea class="sp-desc" placeholder="Short description of scope, location, or purpose…">${esc(p.description || '')}</textarea>
+      <input class="sp-kw" value="${esc((p.keywords||[]).join(', '))}" placeholder="keywords (comma separated)">
+    </div>
+    <button class="ia del sp-del" onclick="this.closest('.seed-project-row').remove(); _refreshSeedParents()">✕</button>`;
+  if (p.parent) div.dataset.parentVal = p.parent;
+  list.appendChild(div);
+  _refreshSeedParents();
 }
 
 async function seedRunScan() {

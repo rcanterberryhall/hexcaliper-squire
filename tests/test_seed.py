@@ -224,7 +224,8 @@ def test_seed_apply_retags_untagged_items(client):
     assert len(tagged) > 0
 
 
-def test_seed_apply_does_not_retag_already_tagged_items(client):
+def test_seed_apply_adds_tag_to_already_tagged_items(client):
+    """Multi-tag: items with existing tags gain new matching tags (additive)."""
     analyses.insert(_analysis("pre-tagged", "Reactor note", "Already tagged",
                                project_tag="Other Project",
                                body_preview="reactor coolant"))
@@ -235,7 +236,10 @@ def test_seed_apply_does_not_retag_already_tagged_items(client):
             "retag":    True,
         })
     rec = next(a for a in analyses.all() if a.get("item_id") == "pre-tagged")
-    assert rec["project_tag"] == "Other Project"
+    import db as _db
+    tags = _db.parse_project_tags(rec["project_tag"])
+    assert "Other Project" in tags
+    assert "Reactor Upgrade" in tags
 
 
 def test_seed_apply_merges_topics_without_duplicates(client):

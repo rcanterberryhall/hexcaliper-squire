@@ -16,6 +16,7 @@ import requests
 import llm
 
 import config
+import db
 
 # ── Reference extraction ───────────────────────────────────────────────────────
 
@@ -98,9 +99,11 @@ def find_correlated_candidates(
                 if not cid or cid == item_id:
                     continue
                 # Only correlate within same project or both untagged
-                rec_proj = rec.get("project_tag")
-                if rec_proj != project_tag:
-                    continue
+                rec_tags = db.parse_project_tags(rec.get("project_tag"))
+                query_tags = db.parse_project_tags(project_tag)
+                if rec_tags != query_tags and not set(rec_tags) & set(query_tags):
+                    if rec_tags or query_tags:  # skip unless both untagged
+                        continue
                 stored_vec = get_item_vector(cid)
                 if stored_vec is None:
                     continue

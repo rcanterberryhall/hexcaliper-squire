@@ -152,13 +152,13 @@ def index_item(analysis) -> None:
             weight    = EDGE_WEIGHTS["authored_by"],
         )
 
-    # Project edge
-    if analysis.project_tag:
-        proj_node = _project_id(analysis.project_tag)
+    # Project edges (one per tag for multi-tagged items)
+    for ptag in db.parse_project_tags(analysis.project_tag):
+        proj_node = _project_id(ptag)
         db.upsert_node(
             node_id   = proj_node,
             node_type = "project",
-            label     = analysis.project_tag,
+            label     = ptag,
         )
         db.upsert_edge(
             src_id    = item_node,
@@ -302,9 +302,9 @@ def get_context(item, max_n: int = 5) -> list[dict]:
     if primary_email:
         _add_candidates(_person_id(primary_email), "authored_by")
 
-    # 3. Same project
-    if project_tag:
-        _add_candidates(_project_id(project_tag), "tagged_to")
+    # 3. Same project(s)
+    for ptag in db.parse_project_tags(project_tag):
+        _add_candidates(_project_id(ptag), "tagged_to")
 
     # Sort by context_score descending and return top N
     ranked = sorted(scored.values(), key=lambda x: x["context_score"], reverse=True)

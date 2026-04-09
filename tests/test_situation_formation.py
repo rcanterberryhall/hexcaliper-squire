@@ -212,8 +212,7 @@ def test_situation_not_formed_when_cancelled():
 
 
 def test_situation_project_tag_consensus():
-    """Situation project_tag should equal the shared tag when all members agree,
-    and become None once a member from a different project is merged in."""
+    """Situation project_tag should be the union of all member tags (multi-tag)."""
     _insert_analysis("e1", refs=["proj-88"], project_tag="alpha")
     _insert_analysis("e2", refs=["proj-88"], project_tag="alpha")
     _insert_analysis("e3", refs=["proj-88"], project_tag="alpha")
@@ -224,12 +223,15 @@ def test_situation_project_tag_consensus():
     sit = situations_tbl.all()[0]
     assert sit["project_tag"] == "alpha"
 
-    # Merge a fourth item tagged to a different project — breaks consensus
+    # Merge a fourth item tagged to a different project — adds both tags
     _insert_analysis("e4", project_tag="beta")
     all_ids = sit["item_ids"] + ["e4"]
 
     with patch("situation_manager._correlator.synthesize_situation", return_value=MOCK_SYNTHESIS):
         _update_situation_record(sit["situation_id"], all_ids)
 
+    import db as _db
     updated = situations_tbl.get(Q.situation_id == sit["situation_id"])
-    assert updated["project_tag"] is None
+    tags = _db.parse_project_tags(updated["project_tag"])
+    assert "alpha" in tags
+    assert "beta" in tags

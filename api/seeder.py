@@ -53,9 +53,27 @@ def init(scan_state: dict, run_scan_fn, run_reanalyze_fn, maybe_form_situation_f
 MAP_PROMPT = """\
 You are analyzing work items from {user_name}'s ops inbox.
 {context_block}
+{existing_projects_block}
 
-Identify distinct ongoing projects or workstreams and recurring operational concerns from these items.
+Identify the major ongoing projects or workstreams from these items. A project is a \
+sustained effort spanning multiple emails or days — not a single email or one-off task. \
+Group related emails into the same project. Return at most 8 projects per batch. \
 Passdown notes describe active operational handoffs — weight them heavily.
+
+Keyword rules:
+- Return 5-8 keywords per project
+- Include project codes and numbers (e.g. "P905", "RV09", "P1304")
+- Include related sub-codes or vehicle/unit identifiers that appear (e.g. "RV08", "RV15")
+- Include technical terms, part names, and system names specific to the workstream
+- Include key people or company names strongly associated with the project
+- DO NOT use the full project name as a keyword
+- DO NOT use generic words like "update", "implementation", "documentation", "logistics", "issue"
+
+If the user already has projects configured, use their EXACT project names when the \
+content matches. Only propose a new project name if no existing project fits.
+
+Do NOT create projects for automated notifications (security digests, quarantine alerts, \
+marketing emails, system notifications). Those are noise, not projects.
 
 Items:
 {items_block}
@@ -63,7 +81,7 @@ Items:
 Respond ONLY with valid JSON — no markdown, no explanation:
 {{
   "projects": [
-    {{"name": "short project name", "keywords": ["keyword1", "keyword2", "keyword3"]}}
+    {{"name": "short project name", "keywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"]}}
   ],
   "concerns": ["brief recurring concern phrase"]
 }}
@@ -72,12 +90,33 @@ Respond ONLY with valid JSON — no markdown, no explanation:
 REDUCE_PROMPT = """\
 You are synthesizing project intelligence for {user_name}.
 {context_block}
+{existing_projects_block}
 
 Below are theme extracts from {n_batches} batches covering {n_items} work items.
 
 {themes_block}
 
-Produce a final consolidated list. Merge similar projects. Keep only projects with strong evidence. Topics are recurring concerns that don't fit a specific project.
+Produce a final consolidated list of discovered projects. IMPORTANT RULES:
+
+1. If the user already has projects configured, use their EXACT names. Merge any \
+discovered themes into the matching existing project rather than creating a new one. \
+For example, if the user has "Seatbelts upgrades" and the batches found "Seatbelt \
+Restraint System", merge into the existing name "Seatbelts upgrades".
+
+2. Only propose NEW projects for workstreams that genuinely do not match any existing \
+project. Keep new additions to 3-5 max.
+
+3. Every project MUST have 5-8 keywords. Include project codes, sub-codes, technical \
+terms, part names, and key personnel. Remove generic words (implementation, \
+documentation, logistics, update, issue).
+
+4. Do NOT create projects for automated notifications, security digests, marketing \
+emails, or system alerts. Those belong in noise filters.
+
+5. Topics are PERSISTENT operational concerns spanning weeks or months — not individual \
+tasks. Good: "procurement delays", "site access coordination". \
+Bad: "availability for tomorrow", "transformer confirmation needed". \
+Keep topics to 3-5 words max, at most 5 topics total.
 
 Respond ONLY with valid JSON — no markdown, no explanation:
 {{
@@ -134,6 +173,28 @@ def _run_seed_job(context: str) -> None:
         context_block = f"Context about {user_name}: {context}" if context else ""
         _seed_job.update({"state": "analyzing", "progress": "Starting analysis…"})
 
+        # Build existing-projects block so the LLM merges into user's names
+        existing_projects_block = ""
+        if config.PROJECTS:
+            lines = []
+            for p in config.PROJECTS:
+                name = p.get("name", "")
+                desc = p.get("description", "")
+                parent = p.get("parent", "")
+                kw = list(p.get("keywords", [])) + list(p.get("learned_keywords", []))
+                entry = name
+                if parent:
+                    entry += f" [sub-project of {parent}]"
+                if desc:
+                    entry += f" — {desc}"
+                if kw:
+                    entry += f" (keywords: {', '.join(kw[:10])})"
+                lines.append(f"  - {entry}")
+            existing_projects_block = (
+                "\nThe user already has these projects configured — use their EXACT "
+                "names when content matches:\n" + "\n".join(lines)
+            )
+
         with db.lock:
             all_items = db.get_all_items()
 
@@ -150,9 +211,10 @@ def _run_seed_job(context: str) -> None:
         passdown_count = sum(1 for a in all_items if a.get("is_passdown"))
         n_items        = len(all_items)
 
-        batch_size = 6
+        batch_size = 15
         n_batches  = max(1, (n_items + batch_size - 1) // batch_size)
 
+        print(f"[seed] analysing {n_items} items ({passdown_count} passdowns) in {n_batches} batches")
         _seed_job["progress"] = f"Analysing {n_items} items ({passdown_count} passdowns)…"
 
         # Map pass
@@ -178,21 +240,26 @@ def _run_seed_job(context: str) -> None:
             prompt = MAP_PROMPT.format(
                 user_name=user_name,
                 context_block=context_block,
+                existing_projects_block=existing_projects_block,
                 items_block=items_block,
             )
+            print(f"[seed] map batch {batch_num}/{n_batches}: {len(batch)} items")
             try:
                 with orchestrator.get_sem():
                     text = llm.generate(
                         prompt, format="json", temperature=0.2,
-                        num_predict=300, timeout=120,
+                        num_predict=900, timeout=120,
                     )
+                print(f"[seed] map batch {batch_num} raw response: {text!r}")
                 data = json.loads(text or "{}")
+                print(f"[seed] map batch {batch_num}: {len(data.get('projects', []))} projects, {len(data.get('concerns', []))} concerns")
                 map_results.append(data)
             except Exception as e:
                 last_map_err = str(e)
                 print(f"[seed] map batch {batch_start} failed: {e}")
                 continue
 
+        print(f"[seed] map pass complete: {len(map_results)}/{n_batches} batches succeeded")
         if not map_results:
             err_detail = f" ({last_map_err})" if last_map_err else ""
             _seed_job.update({
@@ -218,6 +285,7 @@ def _run_seed_job(context: str) -> None:
         reduce_prompt = REDUCE_PROMPT.format(
             user_name=user_name,
             context_block=context_block,
+            existing_projects_block=existing_projects_block,
             n_batches=len(map_results),
             n_items=n_items,
             themes_block=themes_block,
@@ -227,11 +295,13 @@ def _run_seed_job(context: str) -> None:
             with orchestrator.get_sem():
                 text = llm.generate(
                     reduce_prompt, format="json", temperature=0.2,
-                    num_predict=400, timeout=120,
+                    num_predict=1800, timeout=180,
                 )
+            print(f"[seed] reduce raw response: {text!r}")
             final    = json.loads(text or "{}")
             projects = final.get("projects", [])
             topics   = final.get("topics", [])
+            print(f"[seed] reduce result: {len(projects)} projects, {len(topics)} topics")
         except Exception as e:
             print(f"[seed] reduce failed: {e}")
             projects   = []
@@ -245,7 +315,10 @@ def _run_seed_job(context: str) -> None:
                         projects.append(p)
                 topics.extend(mr.get("concerns", []))
             topics = list(dict.fromkeys(topics))
+            print(f"[seed] reduce fallback: {len(projects)} projects, {len(topics)} topics")
 
+        print(f"[seed] final projects: {json.dumps(projects, indent=2)}")
+        print(f"[seed] final topics: {topics}")
         _seed_job.update({
             "state":          "review",
             "status":         "running",
@@ -313,7 +386,7 @@ def apply(body: dict, background_tasks) -> dict:
 
     :param body: Dict with keys ``projects``, ``topics``, ``retag``.
     :param background_tasks: FastAPI BackgroundTasks runner.
-    :return: ``{"ok": True, "projects_added": N, "topics_added": M, "items_retagged": K}``
+    :return: ``{"ok": True, "projects_added": N, "projects_merged": M, "topics_added": T, "items_retagged": K}``
     """
     global _seed_job
     suggested_projects = body.get("projects", [])
@@ -324,23 +397,53 @@ def apply(body: dict, background_tasks) -> dict:
         existing = db.get_settings()
 
     current_projects: list[dict] = existing.get("projects", list(config.PROJECTS))
-    current_names = {p.get("name", "").lower() for p in current_projects}
+    current_names = {p.get("name", "").lower(): i for i, p in enumerate(current_projects)}
 
-    projects_added = 0
+    projects_added  = 0
+    projects_merged = 0
     for sp in suggested_projects:
         name = sp.get("name", "").strip()
         if not name:
             continue
-        if name.lower() not in current_names:
-            current_projects.append({
-                "name":             name,
-                "keywords":         sp.get("keywords", []),
-                "channels":         [],
-                "learned_keywords": [],
-                "learned_senders":  [],
-            })
-            current_names.add(name.lower())
-            projects_added += 1
+        name_lower = name.lower()
+
+        # Check for exact match first
+        if name_lower in current_names:
+            # Merge: add any new keywords the seed found into the existing project
+            idx = current_names[name_lower]
+            existing_kw = set(
+                k.lower() for k in
+                current_projects[idx].get("keywords", [])
+                + current_projects[idx].get("learned_keywords", [])
+            )
+            new_kw = [
+                k for k in sp.get("keywords", [])
+                if k and k.lower() not in existing_kw
+            ]
+            if new_kw:
+                current_projects[idx].setdefault("keywords", []).extend(new_kw)
+                projects_merged += 1
+            # Fill in description if existing project has none and seed provides one
+            if sp.get("description") and not current_projects[idx].get("description"):
+                current_projects[idx]["description"] = sp["description"]
+            # Fill in parent if existing project has none and seed provides one
+            if sp.get("parent") and not current_projects[idx].get("parent"):
+                current_projects[idx]["parent"] = sp["parent"]
+            continue
+
+        # New project — add with all fields from the seed editor
+        current_projects.append({
+            "name":             name,
+            "parent":           sp.get("parent", ""),
+            "description":      sp.get("description", ""),
+            "keywords":         sp.get("keywords", []),
+            "senders":          sp.get("senders", []),
+            "channels":         [],
+            "learned_keywords": [],
+            "learned_senders":  [],
+        })
+        current_names[name_lower] = len(current_projects) - 1
+        projects_added += 1
 
     existing_ft_raw = existing.get("focus_topics", ", ".join(config.FOCUS_TOPICS))
     existing_topics = [t.strip() for t in existing_ft_raw.split(",") if t.strip()]
@@ -366,26 +469,30 @@ def apply(body: dict, background_tasks) -> dict:
         with db.lock:
             all_items = db.get_all_items()
 
-        updates = []
+        updates = []  # (item_id, [matching_project_names])
         for item in all_items:
-            if item.get("project_tag"):
-                continue
+            existing_tags = db.parse_project_tags(item.get("project_tag"))
             text = " ".join([
                 item.get("title", ""),
                 item.get("body_preview", ""),
                 item.get("summary", ""),
             ]).lower()
+            matched = []
             for proj in new_projects:
+                if proj["name"] in existing_tags:
+                    continue  # already tagged
                 kws = proj.get("keywords", []) + proj.get("learned_keywords", [])
                 if any(kw.lower() in text for kw in kws if kw):
-                    updates.append((item.get("item_id"), proj["name"]))
-                    items_retagged += 1
-                    break
+                    matched.append(proj["name"])
+            if matched:
+                new_tags = existing_tags + matched
+                updates.append((item.get("item_id"), db.serialize_project_tags(new_tags)))
+                items_retagged += 1
 
         if updates:
             with db.lock:
-                for item_id, tag in updates:
-                    db.update_item(item_id, {"project_tag": tag})
+                for item_id, tag_val in updates:
+                    db.update_item(item_id, {"project_tag": tag_val})
 
     def _seed_embed_and_correlate() -> None:
         """
@@ -407,8 +514,8 @@ def apply(body: dict, background_tasks) -> dict:
             with db.lock:
                 all_items = db.get_all_items()
             for item in all_items:
-                tag = item.get("project_tag")
-                if not tag:
+                tags = db.parse_project_tags(item.get("project_tag"))
+                if not tags:
                     continue
                 text = " ".join(filter(None, [
                     item.get("title", ""),
@@ -420,15 +527,16 @@ def apply(body: dict, background_tasks) -> dict:
                 try:
                     vector = embed(text)
                     if vector:
-                        update_project(
-                            project_name = tag,
-                            item_id      = item.get("item_id", ""),
-                            vector       = vector,
-                            category     = item.get("category", "fyi"),
-                            hierarchy    = item.get("hierarchy", "general"),
-                            source       = item.get("source", ""),
-                            priority     = item.get("priority", "medium"),
-                        )
+                        for tag in tags:
+                            update_project(
+                                project_name = tag,
+                                item_id      = item.get("item_id", ""),
+                                vector       = vector,
+                                category     = item.get("category", "fyi"),
+                                hierarchy    = item.get("hierarchy", "general"),
+                                source       = item.get("source", ""),
+                                priority     = item.get("priority", "medium"),
+                            )
                 except Exception as e:
                     print(f"[seed] embed {item.get('item_id')}: {e}")
             print("[seed] embedding sweep complete")
@@ -478,10 +586,11 @@ def apply(body: dict, background_tasks) -> dict:
     threading.Thread(target=_monitor_reanalyze, daemon=True).start()
 
     return {
-        "ok":             True,
-        "projects_added": projects_added,
-        "topics_added":   topics_added,
-        "items_retagged": items_retagged,
+        "ok":              True,
+        "projects_added":  projects_added,
+        "projects_merged": projects_merged,
+        "topics_added":    topics_added,
+        "items_retagged":  items_retagged,
     }
 
 

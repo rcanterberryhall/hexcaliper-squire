@@ -141,6 +141,55 @@ class TestClaude:
         assert body["model"] == "claude-sonnet-4-20250514"
 
 
+class TestCollectStream:
+    """Tests for _collect_stream thinking-token fallback."""
+
+    def _make_stream(self, lines: list[dict]) -> MagicMock:
+        m = MagicMock()
+        m.iter_lines.return_value = iter(
+            [json.dumps(l).encode() for l in lines]
+        )
+        return m
+
+    def test_normal_response_tokens(self):
+        resp = self._make_stream([
+            {"response": '{"ok":true}', "done": False},
+            {"response": "", "done": True},
+        ])
+        assert llm._collect_stream(resp) == '{"ok":true}'
+
+    def test_strips_think_tags_from_response(self):
+        resp = self._make_stream([
+            {"response": "<think>reasoning</think>{\"ok\":true}", "done": False},
+            {"response": "", "done": True},
+        ])
+        assert llm._collect_stream(resp) == '{"ok":true}'
+
+    def test_fallback_to_thinking_field_when_response_empty(self):
+        """When model puts answer in thinking NDJSON field, use it."""
+        resp = self._make_stream([
+            {"response": "", "thinking": '{"ok":true}', "done": False},
+            {"response": "", "done": True},
+        ])
+        assert llm._collect_stream(resp) == '{"ok":true}'
+
+    def test_thinking_field_with_think_tags(self):
+        """Thinking field may contain <think> tags wrapping reasoning + answer."""
+        resp = self._make_stream([
+            {"response": "", "thinking": "<think>let me think</think>{\"ok\":true}", "done": False},
+            {"response": "", "done": True},
+        ])
+        assert llm._collect_stream(resp) == '{"ok":true}'
+
+    def test_response_preferred_over_thinking(self):
+        """When both fields have content, response wins."""
+        resp = self._make_stream([
+            {"response": '{"from":"response"}', "thinking": "other stuff", "done": False},
+            {"response": "", "done": True},
+        ])
+        assert llm._collect_stream(resp) == '{"from":"response"}'
+
+
 class TestEffectiveModel:
     def test_returns_escalation_model_when_set(self, monkeypatch):
         monkeypatch.setattr(config, "ESCALATION_MODEL", "custom-model")

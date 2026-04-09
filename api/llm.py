@@ -36,6 +36,9 @@ def _collect_stream(resp: requests.Response) -> str:
     """Read an Ollama NDJSON stream and return the concatenated response text.
 
     Strips Qwen3 thinking tags so callers always get the final answer only.
+    When the model places its answer in the ``thinking`` NDJSON field (instead
+    of ``response``), the thinking content is used as a fallback so output is
+    never silently lost.
     """
     parts: list[str] = []
     think_parts: list[str] = []
@@ -52,8 +55,11 @@ def _collect_stream(resp: requests.Response) -> str:
         think_token = obj.get("thinking", "")
         if think_token:
             think_parts.append(think_token)
-    text = "".join(parts)
-    return _strip_think(text)
+    text = _strip_think("".join(parts))
+    if not text.strip() and think_parts:
+        # Model placed its answer in the thinking field — extract it.
+        text = _strip_think("".join(think_parts))
+    return text
 
 
 def generate(

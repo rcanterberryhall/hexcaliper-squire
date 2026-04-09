@@ -1706,12 +1706,14 @@ def patch_intel(doc_id: int, body: dict):
 
 # ── Briefing ──────────────────────────────────────────────────────────────────
 
-def _build_briefing() -> dict:
+def _build_briefing(*, full: bool = False) -> dict:
     """
     Generate a project-status briefing using the LLM.
 
     Only projects (and the untagged pool) that have had intel, situation, or
     todo activity since the last briefing are included, saving LLM tokens.
+    When *full* is True the cutoff is ignored and all data is summarised
+    (used by the manual Regenerate button).
 
     :return: Briefing dict with ``generated_at`` and ``sections`` list.
     :rtype: dict
@@ -1723,7 +1725,9 @@ def _build_briefing() -> dict:
         all_sits    = db.get_all_situations(include_dismissed=False)
         all_items   = db.get_all_items()
 
-    cutoff = last["generated_at"] if last else "1970-01-01T00:00:00+00:00"
+    cutoff = "1970-01-01T00:00:00+00:00" if full else (
+        last["generated_at"] if last else "1970-01-01T00:00:00+00:00"
+    )
 
     # Collect project tags with activity since last briefing.
     active_projects: set[str] = set()
@@ -1818,10 +1822,15 @@ def generate_briefing(background_tasks: BackgroundTasks):
     :rtype: dict
     """
     def _run():
-        content = _build_briefing()
-        with db.lock:
-            db.save_briefing(content)
-        print(f"[briefing] generated {len(content.get('sections', []))} sections")
+        try:
+            content = _build_briefing(full=True)
+            with db.lock:
+                db.save_briefing(content)
+            print(f"[briefing] generated {len(content.get('sections', []))} sections")
+        except Exception as exc:
+            print(f"[briefing] generation failed: {exc}")
+            with db.lock:
+                db.save_briefing({"sections": [], "error": str(exc)})
 
     background_tasks.add_task(_run)
     return {"ok": True}

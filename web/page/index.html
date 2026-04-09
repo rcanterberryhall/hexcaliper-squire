@@ -2334,6 +2334,11 @@ async function loadBriefing() {
 function renderBriefing(data) {
   const el = $('intel-view');
   if (!el) return;
+  if (data && data.error) {
+    el.innerHTML = `<div class="empty"><div class="empty-icon">⚠</div>
+      <div class="empty-msg">Briefing generation failed: ${esc(data.error)}\nClick ↺ Regenerate to retry.</div></div>`;
+    return;
+  }
   if (!data || !data.sections || !data.sections.length) {
     el.innerHTML = `<div class="empty"><div class="empty-icon">◻</div>
       <div class="empty-msg">No briefing yet.\nA briefing is auto-generated after each scan.\nClick ↺ Regenerate to create one now.</div></div>`;

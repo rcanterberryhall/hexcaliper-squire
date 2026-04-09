@@ -53,8 +53,6 @@ def _collect_stream(resp: requests.Response) -> str:
         if think_token:
             think_parts.append(think_token)
     text = "".join(parts)
-    if not text.strip() and think_parts:
-        text = "".join(think_parts)
     return _strip_think(text)
 
 

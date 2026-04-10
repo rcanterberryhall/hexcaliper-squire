@@ -260,7 +260,7 @@ def ollama_headers() -> dict:
     :return: Dict of HTTP headers to include with every Ollama request.
     :rtype: dict
     """
-    h = {"Content-Type": "application/json"}
+    h = {"Content-Type": "application/json", "X-Source": "parsival"}
     if CF_CLIENT_ID and CF_CLIENT_SECRET:
         h["CF-Access-Client-Id"]     = CF_CLIENT_ID
         h["CF-Access-Client-Secret"] = CF_CLIENT_SECRET

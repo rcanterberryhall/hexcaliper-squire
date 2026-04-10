@@ -36,7 +36,7 @@ def test_ollama_headers_without_cf(monkeypatch):
     monkeypatch.setattr(config, "CF_CLIENT_ID", "")
     monkeypatch.setattr(config, "CF_CLIENT_SECRET", "")
     h = config.ollama_headers()
-    assert h == {"Content-Type": "application/json"}
+    assert h == {"Content-Type": "application/json", "X-Source": "parsival"}
 
 
 def test_ollama_headers_with_cf(monkeypatch):
@@ -46,3 +46,4 @@ def test_ollama_headers_with_cf(monkeypatch):
     assert h["CF-Access-Client-Id"] == "id-123"
     assert h["CF-Access-Client-Secret"] == "secret-456"
     assert h["Content-Type"] == "application/json"
+    assert h["X-Source"] == "parsival"

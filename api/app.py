@@ -1271,9 +1271,14 @@ def save_settings(body: dict):
     for k, v in body.items():
         if v is not None and _MASK not in str(v):
             existing[k] = v
+        elif _MASK in str(v):
+            _log.debug("settings key %r skipped (contains mask)", k)
 
     new_project_names = {p.get("name") for p in existing.get("projects", [])}
     removed_projects  = old_project_names - new_project_names
+
+    _log.info("save_settings: old_projects=%s new_projects=%s removed=%s",
+              old_project_names, new_project_names, removed_projects)
 
     with db.lock:
         db.save_settings(existing)
@@ -1291,7 +1296,12 @@ def save_settings(body: dict):
                         "UPDATE intel SET project_tag = ? WHERE id = ?",
                         (tags[0] if tags else None, row["id"]),
                     )
-            situation_manager._sync_situation_tags_all()
+
+    # Sync situation tags outside the db.lock — _sync_situation_tags_all
+    # acquires db.lock internally, so calling it while holding the lock
+    # would deadlock (threading.Lock is not reentrant).
+    if removed_projects:
+        situation_manager._sync_situation_tags_all()
 
     config.apply_overrides(existing)
     if "scan_schedule" in body:
@@ -2760,4 +2770,14 @@ def merllm_status():
         r = http_requests.get(f"{config.MERLLM_URL}/api/merllm/status", timeout=3)
         return r.json()
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "mode": "unknown"}
+        return {"ok": False, "error": str(exc), "routing": "unknown"}
+
+
+@app.get("/merllm/default-model")
+def merllm_default_model():
+    """Proxy GET /api/merllm/default-model from merLLM."""
+    try:
+        r = http_requests.get(f"{config.MERLLM_URL}/api/merllm/default-model", timeout=3)
+        return r.json()
+    except Exception as exc:
+        return {"model": None, "error": str(exc)}

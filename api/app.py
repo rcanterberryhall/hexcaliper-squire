@@ -63,6 +63,7 @@ import db
 from agent import extract_keywords, extract_emails, resolve_owner_email, generate_project_briefing
 from models import RawItem, Analysis
 import contacts as _contacts
+import signatures as _signatures
 import correlator as _correlator
 import situation_manager
 import orchestrator
@@ -620,13 +621,23 @@ def _save_analysis(a: Analysis, reanalyze: bool = False) -> None:
 
         # Scrape contacts from this item's headers (live ingestion).  Failures
         # are swallowed inside the helper so they cannot break analysis.
-        _contacts.scrape_item_headers({
+        item_for_contacts = {
             "item_id":  a.item_id,
             "author":   a.author,
             "to_field": a.to_field,
             "cc_field": a.cc_field,
             "timestamp": a.timestamp,
-        })
+            "body_preview": a.body_preview,
+        }
+        _contacts.scrape_item_headers(item_for_contacts)
+        # Then enrich the author's contact row with anything we can pull
+        # from the email body's signature block (squire#31).  Must run
+        # *after* the header scrape so the contact row already exists; the
+        # helper is a no-op when it doesn't.  Failures are swallowed inside.
+        try:
+            _signatures.parse_item_body(item_for_contacts)
+        except Exception as exc:                                # pragma: no cover
+            _log.warning("signatures: live parse failed for %s: %s", a.item_id, exc)
 
         if a.has_action and a.category != "fyi":
             for item in a.action_items:
@@ -2898,13 +2909,40 @@ def patch_contact(contact_id: int, body: dict):
     """
     Update editable fields on a contact.  Unknown columns are silently dropped.
 
+    Any editable field included in the request body is treated as a manual
+    edit: its ``<field>_source`` is stamped ``manual`` and the field name is
+    added to ``manually_edited_fields`` so the signature parser will never
+    overwrite it later.  This is the contract that makes manual edits sticky
+    against repeated re-parses (squire#31).
+
     :raises HTTPException 404: If no contact with ``contact_id`` exists.
     """
+    body = body or {}
     with db.lock:
         existing = db.get_contact(contact_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Contact not found")
-        db.update_contact(contact_id, body or {})
+
+        # Editable text fields → matching *_source columns.  When the user
+        # sets one of these via the UI we lock it from the parser.
+        editable_to_source = {
+            "name":             "name_source",
+            "phone":            "phone_source",
+            "employer":         "employer_source",
+            "title":            "title_source",
+            "employer_address": "address_source",
+        }
+        existing_locks = list(existing.get("manually_edited_fields") or [])
+        new_locks = set(existing_locks)
+        updates = dict(body)
+        for field_name, source_col in editable_to_source.items():
+            if field_name in body:
+                updates[source_col] = "manual"
+                new_locks.add(field_name)
+        if new_locks != set(existing_locks):
+            updates["manually_edited_fields"] = sorted(new_locks)
+
+        db.update_contact(contact_id, updates)
         return db.get_contact(contact_id)
 
 
@@ -2977,6 +3015,22 @@ def rebuild_contacts():
     :return: ``{"ok": True, "items_scanned": N, "contacts_touched": M, "total_contacts": K}``
     """
     summary = _contacts.rebuild_from_items()
+    return {"ok": True, **summary}
+
+
+@app.post("/contacts/reparse-signatures")
+def reparse_contact_signatures():
+    """
+    Walk every existing item and re-run the email-body signature parser
+    against the corresponding contact rows (squire#31).  Manually-edited
+    fields are never overwritten — see ``signatures.apply_to_contact``.
+
+    Mirrors ``/contacts/rebuild`` but for the body-parsing pass.  Idempotent
+    and safe to re-run.
+
+    :return: ``{"ok": True, "items_scanned": N, "items_applied": M, "fields_written": K}``
+    """
+    summary = _signatures.reparse_all_items()
     return {"ok": True, **summary}
 
 

@@ -573,8 +573,11 @@ The contacts table is a long-lived directory of every person Squire has seen acr
 | `POST`   | `/contacts/{id}/emails`                    | Attach an email to a contact (`{"email", "is_primary"}`). Returns 409 if email belongs to another contact |
 | `DELETE` | `/contacts/{id}/emails/{email}`            | Detach an email from a contact                                                                   |
 | `POST`   | `/contacts/rebuild`                        | Rescan every existing item's `author`/`to`/`cc` headers and refresh the contacts table. Idempotent — safe to run repeatedly after schema changes or bulk imports |
+| `POST`   | `/contacts/reparse-signatures`             | Walk every item and re-run the email-body signature parser. Extracts phone, title, employer, and address from sender footers. Manually-edited fields are never overwritten. Idempotent |
 
-Live ingestion is automatic: every time the analysis pipeline saves an item, its headers are scraped into the contacts table in the background. Failures during scraping never block analysis. Signature parsing (extracting phone/title from email body footers) is tracked separately and is not part of this feature.
+Live ingestion is automatic: every time the analysis pipeline saves an item, both passes run in the background — header scraping populates the row from To/CC/author, then the signature parser enriches it from the email body. Failures in either pass are swallowed so they never block analysis.
+
+**Provenance and manual edits.** Each editable field on a contact carries a `*_source` tag of `header`, `signature`, or `manual`. The signature parser tags every field it writes with the corresponding confidence score (stored in `signature_confidence`) and **never** overwrites a field that has been edited by hand — those are tracked in `manually_edited_fields` and the editor flips them to `manual` automatically when you save. Re-running `/contacts/reparse-signatures` is therefore safe: it will fill in gaps from new emails and refresh confidence scores, but it cannot clobber your edits.
 
 ## Request logging
 

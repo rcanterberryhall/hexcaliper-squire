@@ -145,6 +145,29 @@ def _migrate_schema(c: sqlite3.Connection) -> None:
     if "notes" not in sit_cols:
         c.execute("ALTER TABLE situations ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
 
+    # Contacts: provenance + manual-edit tracking for the signature parser
+    # (squire#31).  Each editable field gets a *_source column tagging its
+    # origin: 'header' (scraped from To/CC/author), 'signature' (parsed from
+    # email body), or 'manual' (user typed it in the UI).  Fields the user
+    # has touched are also recorded in manually_edited_fields so the parser
+    # can never overwrite them.  signature_confidence stores per-field
+    # confidence scores (0..1) so the UI can show how sure the parser was.
+    contact_cols = {row[1] for row in c.execute("PRAGMA table_info(contacts)").fetchall()}
+    for col in ("name_source", "phone_source", "employer_source",
+                "title_source", "address_source"):
+        if col not in contact_cols:
+            c.execute(
+                f"ALTER TABLE contacts ADD COLUMN {col} TEXT NOT NULL DEFAULT 'header'"
+            )
+    if "manually_edited_fields" not in contact_cols:
+        c.execute(
+            "ALTER TABLE contacts ADD COLUMN manually_edited_fields TEXT NOT NULL DEFAULT '[]'"
+        )
+    if "signature_confidence" not in contact_cols:
+        c.execute(
+            "ALTER TABLE contacts ADD COLUMN signature_confidence TEXT NOT NULL DEFAULT '{}'"
+        )
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS situation_events (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -361,6 +384,21 @@ def _create_schema(c: sqlite3.Connection) -> None:
         source_count     INTEGER NOT NULL DEFAULT 0,
         last_item_id     TEXT,
         is_manual        INTEGER NOT NULL DEFAULT 0,
+        -- Provenance per editable field: 'header' | 'signature' | 'manual'.
+        -- Defaults to 'header' because that is the only source that existed
+        -- before squire#31.  See _migrate_schema for the matching ALTERs.
+        name_source      TEXT    NOT NULL DEFAULT 'header',
+        phone_source     TEXT    NOT NULL DEFAULT 'header',
+        employer_source  TEXT    NOT NULL DEFAULT 'header',
+        title_source     TEXT    NOT NULL DEFAULT 'header',
+        address_source   TEXT    NOT NULL DEFAULT 'header',
+        -- JSON array of field names the user has manually edited.  The
+        -- signature parser must never overwrite anything in this list.
+        manually_edited_fields TEXT NOT NULL DEFAULT '[]',
+        -- JSON object {field_name: 0..1} of confidence scores from the most
+        -- recent signature-parser run.  Empty when no signature has been
+        -- parsed yet.
+        signature_confidence   TEXT NOT NULL DEFAULT '{}',
         created_at       TEXT,
         updated_at       TEXT
     );
@@ -1102,7 +1140,12 @@ def get_nodes_by_type(node_type: str) -> list[dict]:
 # attaches an "emails" key with the full list, primary first.
 
 def _attach_emails(contact: Optional[dict]) -> Optional[dict]:
-    """Attach the joined emails list to a contact dict (in place)."""
+    """Attach the joined emails list to a contact dict (in place).
+
+    Also decodes the JSON-typed columns (``manually_edited_fields``,
+    ``signature_confidence``) into native Python types so callers (and the
+    API layer) get a list/dict instead of a raw string.
+    """
     if not contact:
         return contact
     rows = conn().execute(
@@ -1115,6 +1158,19 @@ def _attach_emails(contact: Optional[dict]) -> Optional[dict]:
         (r["email"] for r in rows if r["is_primary"]),
         contact["emails"][0] if contact["emails"] else None,
     )
+    # Decode JSON columns to native types.  Tolerate legacy/empty values.
+    raw_edited = contact.get("manually_edited_fields") or "[]"
+    if isinstance(raw_edited, str):
+        try:
+            contact["manually_edited_fields"] = json.loads(raw_edited)
+        except (json.JSONDecodeError, TypeError):
+            contact["manually_edited_fields"] = []
+    raw_conf = contact.get("signature_confidence") or "{}"
+    if isinstance(raw_conf, str):
+        try:
+            contact["signature_confidence"] = json.loads(raw_conf)
+        except (json.JSONDecodeError, TypeError):
+            contact["signature_confidence"] = {}
     return contact
 
 
@@ -1189,9 +1245,25 @@ def insert_contact(data: dict) -> int:
 
     `data` may contain any contact column plus an optional "emails" list.
     Emails are inserted into contact_emails; the first becomes primary.
+
+    Manually-created contacts (``is_manual=True``) default every field's
+    provenance to ``manual`` and seed ``manually_edited_fields`` with the
+    fields the caller actually populated, so the signature parser will not
+    later clobber what the user typed in by hand.
     """
     c = conn()
     now = _now_iso()
+    is_manual = bool(data.get("is_manual"))
+
+    # For manual contacts, every populated field is implicitly "user typed
+    # this" and locked from the signature parser.
+    auto_edited: list[str] = []
+    if is_manual:
+        for field in ("name", "phone", "employer", "title", "employer_address"):
+            if data.get(field):
+                auto_edited.append(field)
+
+    default_source = "manual" if is_manual else "header"
     payload = {
         "name":             data.get("name", "") or "",
         "phone":            data.get("phone", "") or "",
@@ -1203,7 +1275,18 @@ def insert_contact(data: dict) -> int:
         "last_seen":        data.get("last_seen")  or now,
         "source_count":     data.get("source_count", 0),
         "last_item_id":     data.get("last_item_id"),
-        "is_manual":        1 if data.get("is_manual") else 0,
+        "is_manual":        1 if is_manual else 0,
+        "name_source":      data.get("name_source")     or default_source,
+        "phone_source":     data.get("phone_source")    or default_source,
+        "employer_source":  data.get("employer_source") or default_source,
+        "title_source":     data.get("title_source")    or default_source,
+        "address_source":   data.get("address_source")  or default_source,
+        "manually_edited_fields": json.dumps(
+            data.get("manually_edited_fields") or auto_edited
+        ),
+        "signature_confidence":   json.dumps(
+            data.get("signature_confidence") or {}
+        ),
         "created_at":       now,
         "updated_at":       now,
     }
@@ -1234,16 +1317,30 @@ def insert_contact(data: dict) -> int:
 
 
 def update_contact(contact_id: int, updates: dict) -> None:
-    """Apply a partial update to a contact row.  Ignores unknown columns."""
+    """Apply a partial update to a contact row.  Ignores unknown columns.
+
+    JSON-typed columns (``manually_edited_fields``, ``signature_confidence``)
+    are serialised here when callers pass list/dict values.  Source columns
+    are passed through verbatim — callers like the signature parser stamp
+    them explicitly, and the manual PATCH path in app.py adds its own
+    'manual' stamping wrapper around this helper.
+    """
     if not updates:
         return
     allowed = {
         "name", "phone", "employer", "title", "employer_address", "notes",
         "first_seen", "last_seen", "source_count", "last_item_id", "is_manual",
+        "name_source", "phone_source", "employer_source", "title_source",
+        "address_source",
+        "manually_edited_fields", "signature_confidence",
     }
     clean = {k: v for k, v in updates.items() if k in allowed}
     if not clean:
         return
+    # Serialise structured columns if the caller passed a list/dict.
+    for json_col in ("manually_edited_fields", "signature_confidence"):
+        if json_col in clean and not isinstance(clean[json_col], str):
+            clean[json_col] = json.dumps(clean[json_col] or ([] if json_col.endswith("fields") else {}))
     clean["updated_at"] = _now_iso()
     set_clause = ", ".join(f'"{k}" = ?' for k in clean)
     values     = list(clean.values()) + [contact_id]

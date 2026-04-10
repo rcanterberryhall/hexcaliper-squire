@@ -1198,7 +1198,8 @@ tr.attn-low  { opacity:0.65; }
       <dl class="help-kv">
         <dt>Auto-population</dt><dd>Every analyzed item's <code>From</code>, <code>To</code>, and <code>CC</code> fields are scraped automatically. Re-running scans does not duplicate rows — emails are unique across the table and seeing one again just bumps its source count.</dd>
         <dt>Rebuild from items</dt><dd>Rescan every existing item's headers and refresh the contacts table. Idempotent, so safe to run after a schema change or a bulk import.</dd>
-        <dt>Manual editing</dt><dd>Every field is editable: name, phone, employer, title, employer address, notes, and email list. Click any row to open the editor; <strong>+ New contact</strong> creates one from scratch.</dd>
+        <dt>Re-parse signatures</dt><dd>Walks every email body and tries to extract phone, title, employer, and address from the sender's signature block. Each contact field is tagged with its provenance — <em>header</em> (auto from To/CC), <em>signature</em> (parsed from the email body, with a confidence %), or <em>manual</em> (you edited it). Anything you've edited by hand is locked from automatic re-parses.</dd>
+        <dt>Manual editing</dt><dd>Every field is editable: name, phone, employer, title, employer address, notes, and email list. Click any row to open the editor; <strong>+ New contact</strong> creates one from scratch. Editing a field flips its tag to <em>manual</em>, which stops the signature parser from ever overwriting it.</dd>
         <dt>Owner resolution</dt><dd>When the LLM extracts a delegated action item like "Mike, pull the drawings" and Mike is not one of the email's recipients, the action item's assignee is filled in from the contacts table.</dd>
         <dt>Email merging</dt><dd>Adding an email already attached to a different contact returns an error — consolidate manually by editing both rows. The primary email is the first one in the list.</dd>
       </dl>
@@ -2687,6 +2688,7 @@ function renderContactsView(contacts, total, query) {
              style="flex:1;min-width:200px;padding:6px 10px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:12px">
       <button class="ia" onclick="newContact()" style="padding:4px 12px;font-size:12px">+ New contact</button>
       <button class="ia" onclick="rebuildContacts()" title="Re-scrape every existing item's headers" style="padding:4px 12px;font-size:12px">↻ Rebuild from items</button>
+      <button class="ia" onclick="reparseSignatures()" title="Re-parse signatures from email bodies. Manual edits are never overwritten." style="padding:4px 12px;font-size:12px">✎ Re-parse signatures</button>
       <span style="font-size:11px;color:var(--muted);margin-left:auto">${contacts.length} of ${total} contacts</span>
     </div>
     <div id="contactsEditor"></div>
@@ -2748,12 +2750,12 @@ function renderContactEditor(c) {
         <button class="ia" onclick="closeContactEditor()" style="padding:2px 8px;font-size:11px">Close</button>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
-        ${contactField('name',             'Name',             c.name)}
-        ${contactField('phone',            'Phone',            c.phone)}
-        ${contactField('employer',         'Employer',         c.employer)}
-        ${contactField('title',            'Title',            c.title)}
-        ${contactField('employer_address', 'Employer address', c.employer_address)}
-        ${contactField('notes',            'Notes',            c.notes)}
+        ${contactField('name',             'Name',             c.name,             c.name_source,     c)}
+        ${contactField('phone',            'Phone',            c.phone,            c.phone_source,    c)}
+        ${contactField('employer',         'Employer',         c.employer,         c.employer_source, c)}
+        ${contactField('title',            'Title',            c.title,            c.title_source,    c)}
+        ${contactField('employer_address', 'Employer address', c.employer_address, c.address_source,  c)}
+        ${contactField('notes',            'Notes',            c.notes,            null,              c)}
       </div>
       <div style="margin-top:10px">
         <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Emails</div>
@@ -2775,19 +2777,46 @@ function renderContactEditor(c) {
     </div>`;
 }
 
-function contactField(key, label, value) {
+// Render a contact field with a small provenance badge.  ``source`` is one
+// of 'header' | 'signature' | 'manual' (or null for the notes field which
+// has no provenance tracking).  When the field came from the signature
+// parser we also surface the per-field confidence (0..1) from
+// ``c.signature_confidence`` so the user can see how sure we were.
+function contactField(key, label, value, source, c) {
   const tag = key === 'notes' || key === 'employer_address' ? 'textarea' : 'input';
   const v = escapeHtml(value || '');
+  const badge = _provenanceBadge(key, source, c);
+  const labelHtml = `<span style="font-size:11px;color:var(--muted)">${label}</span>${badge}`;
   if (tag === 'textarea') {
     return `<label style="grid-column:1/-1;display:block">
-      <span style="font-size:11px;color:var(--muted)">${label}</span>
+      ${labelHtml}
       <textarea id="cf-${key}" rows="2" style="width:100%;padding:4px 8px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:12px">${v}</textarea>
     </label>`;
   }
   return `<label style="display:block">
-    <span style="font-size:11px;color:var(--muted)">${label}</span>
+    ${labelHtml}
     <input id="cf-${key}" type="text" value="${v}" style="width:100%;padding:4px 8px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:12px">
   </label>`;
+}
+
+// Build the small "[manual]" / "[signature 92%]" / "[header]" tag shown next
+// to each field label in the contact editor.  Returns an empty string when
+// the field has no provenance (e.g. notes) or when the contact has no
+// stored value at all.
+function _provenanceBadge(key, source, c) {
+  if (!source) return '';
+  const conf = (c && c.signature_confidence) ? c.signature_confidence[key] : null;
+  let text, color;
+  if (source === 'manual') {
+    text = 'manual'; color = 'var(--blue, #58a6ff)';
+  } else if (source === 'signature') {
+    const pct = conf != null ? Math.round(conf * 100) + '%' : '';
+    text = `signature${pct ? ' ' + pct : ''}`;
+    color = 'var(--muted)';
+  } else {
+    text = 'header'; color = 'var(--muted)';
+  }
+  return `<span style="margin-left:6px;font-size:9px;padding:1px 5px;border:1px solid ${color};color:${color};border-radius:3px;text-transform:uppercase;letter-spacing:0.3px">${text}</span>`;
 }
 
 function _readContactForm() {
@@ -2870,6 +2899,23 @@ async function rebuildContacts() {
   } catch (e) {
     setStatus('error');
     alert(`Rebuild failed: ${e.message}`);
+  }
+}
+
+// Walk every item and re-run the email-body signature parser against the
+// matching contact rows.  Manually-edited fields are preserved — see the
+// signatures.apply_to_contact rules in the API for what gets overwritten.
+async function reparseSignatures() {
+  if (!confirm('Re-parse every existing item\'s email body for signatures (phone, title, employer, address)?\n\nManually-edited fields are never overwritten. Safe to run repeatedly.')) return;
+  try {
+    setStatus('parsing signatures');
+    const r = await api('/contacts/reparse-signatures', 'POST');
+    setStatus('ready');
+    alert(`Parsed: scanned ${r.items_scanned} items, enriched ${r.items_applied} contacts, wrote ${r.fields_written} fields.`);
+    loadContacts($('contactsSearch')?.value || '');
+  } catch (e) {
+    setStatus('error');
+    alert(`Re-parse failed: ${e.message}`);
   }
 }
 

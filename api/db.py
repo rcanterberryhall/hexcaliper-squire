@@ -27,6 +27,12 @@ multi-step operation should acquire ``db.lock`` themselves:
         db.upsert_item(data)
         db.insert_todo(todo_data)
 
+``db.lock`` is a re-entrant ``threading.RLock`` so a thread that already
+holds the lock can call any helper without self-deadlocking, even if the
+helper itself wraps its work in ``with db.lock:``.  This is defence in
+depth — most helpers do not acquire the lock internally — but it means
+the convention above is safe rather than load-bearing.
+
 The ``conn()`` function returns the thread-shared connection; callers can
 run raw SQL when the helpers do not cover a use-case.
 """
@@ -92,7 +98,7 @@ def item_has_any_project(item: dict) -> bool:
 
 # ── Module-level state ─────────────────────────────────────────────────────────
 
-lock = threading.Lock()          # exposed to callers for atomic operations
+lock = threading.RLock()         # re-entrant: callers may nest without self-deadlock
 _conn: Optional[sqlite3.Connection] = None
 
 

@@ -35,6 +35,10 @@ def clear_db():
     intel_tbl.truncate()
     embeddings_tbl.truncate()
     briefings_tbl.truncate()
+    # Contacts tables don't have a TinyDB-compat proxy; wipe them directly.
+    import db as _db
+    _db.conn().execute("DELETE FROM contact_emails")
+    _db.conn().execute("DELETE FROM contacts")
     config.PROJECTS = []
     config.FOCUS_TOPICS = []
     config.NOISE_KEYWORDS = []

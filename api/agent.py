@@ -640,17 +640,13 @@ def postprocess_action_items(
 
 def resolve_owner_email(owner: str, *header_fields: str) -> str | None:
     """
-    Try to resolve a person's name to an email address from To/CC header fields.
+    Try to resolve a person's name to an email address.
 
-    Splits each header field into ``"Display Name <email>"`` pairs and returns
-    the email for the first entry whose display name contains ``owner`` as a
-    case-insensitive substring.  Used to auto-populate ``assigned_to`` when the
-    LLM sets ``owner`` to someone other than the user.
-
-    TODO(contacts): fall back to a master contacts table when the name is not
-    found in the current item's To/CC headers.  This matters when the LLM
-    picks up a delegated directive like "Mike, pull the drawings" in an email
-    where Mike isn't one of the recipients.  See hexcaliper-squire#24.
+    First scans the supplied To/CC header fields for ``"Display Name <email>"``
+    pairs whose display name contains ``owner`` as a case-insensitive
+    substring.  When that fails, falls back to the master contacts table —
+    important for delegated directives like "Mike, pull the drawings" in an
+    email where Mike isn't one of the visible recipients.
 
     :param owner: Person name returned by the LLM (e.g. ``"John Johnson"``).
     :param header_fields: One or more raw To/CC header strings.
@@ -658,12 +654,29 @@ def resolve_owner_email(owner: str, *header_fields: str) -> str | None:
     :rtype: str or None
     """
     owner_lower = owner.lower().strip()
+    if not owner_lower:
+        return None
+
     for field in header_fields:
         for match in _NAME_EMAIL_RE.finditer(field or ""):
             display_name = match.group(1).strip()
             email        = match.group(2).lower()
             if owner_lower in display_name.lower():
                 return email
+
+    # Fallback: look up the name in the contacts table.  Imported lazily to
+    # avoid a circular import (db imports nothing from agent, but contacts.py
+    # imports from agent — keeping the call here local protects future
+    # refactors from accidentally inverting that dependency).
+    try:
+        import db as _db
+        matches = _db.find_contacts_by_name(owner_lower)
+    except Exception:                                       # pragma: no cover
+        return None
+    for contact in matches:
+        primary = contact.get("primary_email")
+        if primary:
+            return primary
     return None
 
 

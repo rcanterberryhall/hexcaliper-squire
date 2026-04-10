@@ -559,6 +559,23 @@ Intel items are key facts and completed-action notes extracted by the LLM that a
 | `POST`   | `/noise-filters`        | Add a noise filter rule (`{"type": "sender_contains", "value": "..."}`) |
 | `DELETE` | `/noise-filters/{index}` | Remove a noise filter rule by index                                   |
 
+### Contacts
+
+The contacts table is a long-lived directory of every person Squire has seen across email headers, with full manual editing. Identity is a stable serial integer (`contact_id`), **not** an email address — people change addresses when they switch jobs, but the contact record outlives any single field. Multiple emails can belong to one contact via the `contact_emails` join table. Owner-resolution falls back to this table when an LLM-identified delegate isn't named in the current item's To/CC headers.
+
+| Method   | Path                                       | Description                                                                                       |
+|----------|--------------------------------------------|---------------------------------------------------------------------------------------------------|
+| `GET`    | `/contacts`                                | List contacts (params: `query` = substring match against name/employer/title/email, `limit`)     |
+| `GET`    | `/contacts/{id}`                           | Fetch one contact with all attached emails                                                       |
+| `POST`   | `/contacts`                                | Manually create a contact. Body: `{"name", "phone", "employer", "title", "employer_address", "notes", "emails": ["..."]}` — first email becomes primary |
+| `PATCH`  | `/contacts/{id}`                           | Update any subset of contact fields                                                              |
+| `DELETE` | `/contacts/{id}`                           | Delete a contact and cascade-remove all attached emails                                          |
+| `POST`   | `/contacts/{id}/emails`                    | Attach an email to a contact (`{"email", "is_primary"}`). Returns 409 if email belongs to another contact |
+| `DELETE` | `/contacts/{id}/emails/{email}`            | Detach an email from a contact                                                                   |
+| `POST`   | `/contacts/rebuild`                        | Rescan every existing item's `author`/`to`/`cc` headers and refresh the contacts table. Idempotent — safe to run repeatedly after schema changes or bulk imports |
+
+Live ingestion is automatic: every time the analysis pipeline saves an item, its headers are scraped into the contacts table in the background. Failures during scraping never block analysis. Signature parsing (extracting phone/title from email body footers) is tracked separately and is not part of this feature.
+
 ## Request logging
 
 All HTTP requests are logged via middleware: timestamp, method, path, status code, duration (ms), and user email (from `CF-Access-Authenticated-User-Email` header, or `anonymous`). Log levels: INFO for 2xx/3xx, WARNING for 4xx, ERROR for 5xx.

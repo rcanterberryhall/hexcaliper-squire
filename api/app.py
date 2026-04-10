@@ -62,6 +62,7 @@ import crypto
 import db
 from agent import extract_keywords, extract_emails, resolve_owner_email, generate_project_briefing
 from models import RawItem, Analysis
+import contacts as _contacts
 import correlator as _correlator
 import situation_manager
 import orchestrator
@@ -615,6 +616,16 @@ def _save_analysis(a: Analysis, reanalyze: bool = False) -> None:
             "processed_at":       now_iso(),
             "situation_id":       existing_situation_id,
             "references":         json.dumps(refs),
+        })
+
+        # Scrape contacts from this item's headers (live ingestion).  Failures
+        # are swallowed inside the helper so they cannot break analysis.
+        _contacts.scrape_item_headers({
+            "item_id":  a.item_id,
+            "author":   a.author,
+            "to_field": a.to_field,
+            "cc_field": a.cc_field,
+            "timestamp": a.timestamp,
         })
 
         if a.has_action and a.category != "fyi":
@@ -2825,6 +2836,148 @@ def merllm_status():
         return r.json()
     except Exception as exc:
         return {"ok": False, "error": str(exc), "routing": "unknown"}
+
+
+# ── Contacts API ──────────────────────────────────────────────────────────────
+#
+# Contacts are identified by a stable serial integer (`contact_id`).  Email is
+# *not* the primary key — people change addresses when they switch employers,
+# but the contact record should outlive the email.  Every field is manually
+# editable so the user can correct or enrich anything the scraper got wrong.
+
+@app.get("/contacts")
+def list_contacts(query: str | None = None, limit: int = 500):
+    """
+    List contacts, most-recently-seen first, optionally filtered.
+
+    :param query: Optional case-insensitive substring matched against name,
+                  employer, title, or any associated email.
+    :param limit: Maximum rows to return (default 500).
+    :return: ``{"contacts": [...], "total": N}``
+    """
+    with db.lock:
+        rows = db.list_contacts(query=query, limit=limit)
+        total = db.count_contacts()
+    return {"contacts": rows, "total": total}
+
+
+@app.get("/contacts/{contact_id}")
+def get_contact(contact_id: int):
+    """
+    Fetch one contact, with all attached emails.
+
+    :raises HTTPException 404: If no contact with ``contact_id`` exists.
+    """
+    with db.lock:
+        contact = db.get_contact(contact_id)
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    return contact
+
+
+@app.post("/contacts")
+def create_contact(body: dict):
+    """
+    Manually create a new contact.
+
+    Accepts: ``name``, ``phone``, ``employer``, ``title``, ``employer_address``,
+    ``notes``, and an optional ``emails`` list.  The first email in the list
+    becomes the primary.  Emails already attached to another contact are
+    silently skipped — use the dedicated emails endpoint to merge.
+    """
+    body = body or {}
+    body["is_manual"] = True
+    with db.lock:
+        contact_id = db.insert_contact(body)
+        contact    = db.get_contact(contact_id)
+    return contact
+
+
+@app.patch("/contacts/{contact_id}")
+def patch_contact(contact_id: int, body: dict):
+    """
+    Update editable fields on a contact.  Unknown columns are silently dropped.
+
+    :raises HTTPException 404: If no contact with ``contact_id`` exists.
+    """
+    with db.lock:
+        existing = db.get_contact(contact_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Contact not found")
+        db.update_contact(contact_id, body or {})
+        return db.get_contact(contact_id)
+
+
+@app.delete("/contacts/{contact_id}")
+def delete_contact(contact_id: int):
+    """
+    Delete a contact and all of its email associations.
+
+    :raises HTTPException 404: If no contact with ``contact_id`` exists.
+    """
+    with db.lock:
+        existing = db.get_contact(contact_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Contact not found")
+        db.delete_contact(contact_id)
+    return {"ok": True}
+
+
+@app.post("/contacts/{contact_id}/emails")
+def add_contact_email(contact_id: int, body: dict):
+    """
+    Attach an email address to an existing contact.
+
+    Body: ``{"email": "addr@host", "is_primary": false}``
+
+    :raises HTTPException 404: If no contact with ``contact_id`` exists.
+    :raises HTTPException 409: If the email is already attached to a different
+                                contact (caller can merge manually).
+    """
+    email      = (body or {}).get("email", "").strip()
+    is_primary = bool((body or {}).get("is_primary"))
+    if not email:
+        raise HTTPException(status_code=400, detail="email is required")
+    with db.lock:
+        existing = db.get_contact(contact_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Contact not found")
+        ok = db.add_contact_email(contact_id, email, is_primary=is_primary)
+        if not ok:
+            raise HTTPException(
+                status_code=409,
+                detail="Email already attached to a different contact",
+            )
+        return db.get_contact(contact_id)
+
+
+@app.delete("/contacts/{contact_id}/emails/{email}")
+def delete_contact_email(contact_id: int, email: str):
+    """
+    Detach an email from a contact.  Does not delete the contact even if this
+    was its only email — that requires the contact-level DELETE.
+
+    :raises HTTPException 404: If no contact with ``contact_id`` exists.
+    """
+    with db.lock:
+        existing = db.get_contact(contact_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Contact not found")
+        db.remove_contact_email(contact_id, email)
+        return db.get_contact(contact_id)
+
+
+@app.post("/contacts/rebuild")
+def rebuild_contacts():
+    """
+    Walk every existing item and (re)populate the contacts table from To/CC/
+    author headers.  Idempotent — safe to re-run after schema changes or new
+    bulk imports.
+
+    :return: ``{"ok": True, "items_scanned": N, "contacts_touched": M, "total_contacts": K}``
+    """
+    summary = _contacts.rebuild_from_items()
+    return {"ok": True, **summary}
 
 
 @app.get("/merllm/default-model")

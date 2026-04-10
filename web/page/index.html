@@ -897,6 +897,7 @@ tr.attn-low  { opacity:0.65; }
           <button class="vtab"        onclick="setView('items',this)">All Items</button>
           <button class="vtab"        onclick="setView('situations',this)">Situations</button>
           <button class="vtab"        onclick="setView('assigned',this)">Assigned<span id="assigned-badge" class="vtab-badge">0</span></button>
+          <button class="vtab"        onclick="setView('contacts',this)">Contacts</button>
         </div>
         <div class="toolbar-filters">
           <input type="search" class="search-input" id="searchInput" placeholder="Search…" oninput="onSearch(this.value)" autocomplete="off">
@@ -939,6 +940,7 @@ tr.attn-low  { opacity:0.65; }
       <div id="items-view"><div class="loading-placeholder"><div class="spinner-lg"></div><div>Loading items…</div></div></div>
       <div id="situations-view"><div class="loading-placeholder"><div class="spinner-lg"></div><div>Loading situations…</div></div></div>
       <div id="assigned-view" style="display:none"></div>
+      <div id="contacts-view" style="display:none"></div>
     </div>
   </div>
 
@@ -1188,6 +1190,19 @@ tr.attn-low  { opacity:0.65; }
         <tr><td>fyi</td><td>Informational — no action required but worth knowing.</td></tr>
         <tr><td>noise</td><td>Irrelevant to your work — marketing, automated alerts, etc.</td></tr>
       </table>
+    </div>
+
+    <div class="help-section">
+      <h3>Contacts</h3>
+      <p>The Contacts tab is a long-lived directory of every person Squire has seen across email headers — vendors, clients, and colleagues. Identity is a stable internal ID, <strong>not</strong> an email address, so the record outlives any single field when someone changes employer or address. Multiple emails can be attached to one contact.</p>
+      <dl class="help-kv">
+        <dt>Auto-population</dt><dd>Every analyzed item's <code>From</code>, <code>To</code>, and <code>CC</code> fields are scraped automatically. Re-running scans does not duplicate rows — emails are unique across the table and seeing one again just bumps its source count.</dd>
+        <dt>Rebuild from items</dt><dd>Rescan every existing item's headers and refresh the contacts table. Idempotent, so safe to run after a schema change or a bulk import.</dd>
+        <dt>Manual editing</dt><dd>Every field is editable: name, phone, employer, title, employer address, notes, and email list. Click any row to open the editor; <strong>+ New contact</strong> creates one from scratch.</dd>
+        <dt>Owner resolution</dt><dd>When the LLM extracts a delegated action item like "Mike, pull the drawings" and Mike is not one of the email's recipients, the action item's assignee is filled in from the contacts table.</dd>
+        <dt>Email merging</dt><dd>Adding an email already attached to a different contact returns an error — consolidate manually by editing both rows. The primary email is the first one in the list.</dd>
+      </dl>
+      <div class="help-tip">Signature parsing (extracting phone numbers and titles from email body footers) is tracked separately and not part of this feature.</div>
     </div>
 
     <div class="help-section">
@@ -2556,10 +2571,16 @@ function _updateToolbarForView(v) {
   const scoreOpt         = $('sortOptScore');
   const addActionBtn     = $('addActionBtn');
   const regenBriefingBtn = $('regenerateBriefingBtn');
+  const toolbarFilters   = document.querySelector('.toolbar-filters');
+  const showHiddenLbl    = document.querySelector('label.show-done input#showHidden')?.parentElement;
+  // Contacts has its own search bar inside the view; hide the global toolbar bits.
+  const isContacts = v === 'contacts';
+  if (toolbarFilters)   toolbarFilters.style.display   = isContacts ? 'none' : '';
+  if (showHiddenLbl)    showHiddenLbl.style.display    = isContacts ? 'none' : '';
   if (showDoneLbl)      showDoneLbl.style.display      = v === 'todos' ? '' : 'none';
   if (showResolvedLbl)  showResolvedLbl.style.display  = v === 'situations' ? '' : 'none';
   if (scoreOpt)         scoreOpt.style.display         = v === 'situations' ? '' : 'none';
-  if (addActionBtn)     addActionBtn.style.display     = v === 'intel' ? 'none' : '';
+  if (addActionBtn)     addActionBtn.style.display     = (v === 'intel' || isContacts) ? 'none' : '';
   if (regenBriefingBtn) regenBriefingBtn.style.display = v === 'intel' ? '' : 'none';
   // If "score" is selected but we left situations, fall back to priority
   if (v !== 'situations' && sortBy === 'score') {
@@ -2613,11 +2634,243 @@ function setView(v, el) {
   $('items-view').style.display      = v === 'items'      ? 'block' : 'none';
   $('situations-view').style.display = v === 'situations' ? 'block' : 'none';
   $('assigned-view').style.display   = v === 'assigned'   ? 'block' : 'none';
+  $('contacts-view').style.display   = v === 'contacts'   ? 'block' : 'none';
   _updateToolbarForView(v);
   if (v === 'intel')      loadIntel();
   if (v === 'items')      loadItems();
   if (v === 'situations') loadSituations();
   if (v === 'assigned')   loadAssigned();
+  if (v === 'contacts')   loadContacts();
+}
+
+// ── Contacts view ─────────────────────────────────────────────────────────────
+//
+// Identity is contact_id (a stable serial integer), NOT email — people change
+// addresses when they switch jobs, so the record outlives any single field.
+// Every column is manually editable per spec; the scraper only seeds the data.
+
+let _contactsCache = [];
+let _editingContactId = null;
+
+async function loadContacts(query) {
+  const view = $('contacts-view');
+  view.innerHTML = `<div class="loading-placeholder"><div class="spinner-lg"></div><div>Loading contacts…</div></div>`;
+  try {
+    const q = query || '';
+    const { contacts, total } = await api(`/contacts?query=${encodeURIComponent(q)}`);
+    _contactsCache = contacts || [];
+    renderContactsView(_contactsCache, total, q);
+  } catch (e) {
+    view.innerHTML = `<div style="padding:20px;color:var(--red)">Failed to load contacts: ${e.message}</div>`;
+  }
+}
+
+function renderContactsView(contacts, total, query) {
+  const view = $('contacts-view');
+  const rows = contacts.map(c => {
+    const emailList = (c.emails || []).join(', ') || '<span style="color:var(--muted)">—</span>';
+    const meta = [c.title, c.employer].filter(Boolean).join(' · ') || '<span style="color:var(--muted)">no title/employer</span>';
+    return `<tr style="border-bottom:1px solid var(--border2);cursor:pointer" onclick="editContact(${c.contact_id})">
+      <td style="padding:8px 12px"><strong>${escapeHtml(c.name || '(unnamed)')}</strong><div style="font-size:11px;color:var(--muted)">${meta}</div></td>
+      <td style="padding:8px 12px;font-size:11px">${escapeHtml(emailList)}</td>
+      <td style="padding:8px 12px;font-size:11px;color:var(--muted)">${escapeHtml(c.phone || '')}</td>
+      <td style="padding:8px 12px;font-size:11px;color:var(--muted)">${c.source_count || 0}</td>
+      <td style="padding:8px 12px;font-size:11px;color:var(--muted)">${(c.last_seen || '').slice(0, 10)}</td>
+    </tr>`;
+  }).join('');
+
+  view.innerHTML = `
+    <div style="padding:14px 16px;border-bottom:1px solid var(--border2);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <input id="contactsSearch" type="search" placeholder="Search name, email, employer…"
+             value="${escapeHtml(query || '')}"
+             oninput="onContactsSearch(this.value)"
+             style="flex:1;min-width:200px;padding:6px 10px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:12px">
+      <button class="ia" onclick="newContact()" style="padding:4px 12px;font-size:12px">+ New contact</button>
+      <button class="ia" onclick="rebuildContacts()" title="Re-scrape every existing item's headers" style="padding:4px 12px;font-size:12px">↻ Rebuild from items</button>
+      <span style="font-size:11px;color:var(--muted);margin-left:auto">${contacts.length} of ${total} contacts</span>
+    </div>
+    <div id="contactsEditor"></div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr style="border-bottom:1px solid var(--border2);background:var(--surface);text-align:left;font-size:11px;color:var(--muted)">
+          <th style="padding:6px 12px">Name / Title</th>
+          <th style="padding:6px 12px">Emails</th>
+          <th style="padding:6px 12px">Phone</th>
+          <th style="padding:6px 12px"># Seen</th>
+          <th style="padding:6px 12px">Last seen</th>
+        </tr>
+      </thead>
+      <tbody>${rows || '<tr><td colspan="5" style="padding:24px;text-align:center;color:var(--muted)">No contacts yet — click "Rebuild from items" to scrape your existing emails.</td></tr>'}</tbody>
+    </table>`;
+}
+
+let _contactsSearchTimer = null;
+function onContactsSearch(v) {
+  clearTimeout(_contactsSearchTimer);
+  _contactsSearchTimer = setTimeout(() => loadContacts(v), 200);
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function newContact() {
+  _editingContactId = null;
+  renderContactEditor({});
+}
+
+async function editContact(contactId) {
+  try {
+    const c = await api(`/contacts/${contactId}`);
+    _editingContactId = contactId;
+    renderContactEditor(c);
+  } catch (e) {
+    alert(`Failed to load contact: ${e.message}`);
+  }
+}
+
+function renderContactEditor(c) {
+  const isNew = !_editingContactId;
+  const emails = c.emails || [];
+  const emailRows = emails.map(e => `
+    <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+      <span style="flex:1;font-size:12px">${escapeHtml(e)}${e === c.primary_email ? ' <span style="color:var(--accent);font-size:10px">[primary]</span>' : ''}</span>
+      ${isNew ? '' : `<button class="ia" onclick="removeContactEmail('${escapeHtml(e)}')" style="padding:2px 6px;font-size:10px">×</button>`}
+    </div>`).join('');
+
+  const editor = $('contactsEditor');
+  editor.innerHTML = `
+    <div style="padding:14px 16px;border-bottom:1px solid var(--border2);background:var(--surface)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <strong style="font-size:13px">${isNew ? 'New contact' : `Edit contact #${c.contact_id}`}</strong>
+        <button class="ia" onclick="closeContactEditor()" style="padding:2px 8px;font-size:11px">Close</button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
+        ${contactField('name',             'Name',             c.name)}
+        ${contactField('phone',            'Phone',            c.phone)}
+        ${contactField('employer',         'Employer',         c.employer)}
+        ${contactField('title',            'Title',            c.title)}
+        ${contactField('employer_address', 'Employer address', c.employer_address)}
+        ${contactField('notes',            'Notes',            c.notes)}
+      </div>
+      <div style="margin-top:10px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Emails</div>
+        ${emailRows || '<div style="font-size:11px;color:var(--muted)">No emails yet.</div>'}
+        ${isNew ? `
+          <div style="font-size:11px;color:var(--muted);margin-top:6px">Add comma-separated emails on save:</div>
+          <input id="cf-newemails" type="text" placeholder="jane@acme.com, jane@personal.com"
+                 style="width:100%;padding:4px 8px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:12px">` : `
+          <div style="display:flex;gap:6px;margin-top:6px">
+            <input id="cf-newemail" type="email" placeholder="add another email"
+                   style="flex:1;padding:4px 8px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:12px">
+            <button class="ia" onclick="addContactEmail()" style="padding:2px 10px;font-size:11px">Add</button>
+          </div>`}
+      </div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="detail-save" onclick="saveContact()" style="padding:4px 14px">Save</button>
+        ${isNew ? '' : '<button class="ia" onclick="deleteContact()" style="padding:4px 12px;color:var(--red)">Delete</button>'}
+      </div>
+    </div>`;
+}
+
+function contactField(key, label, value) {
+  const tag = key === 'notes' || key === 'employer_address' ? 'textarea' : 'input';
+  const v = escapeHtml(value || '');
+  if (tag === 'textarea') {
+    return `<label style="grid-column:1/-1;display:block">
+      <span style="font-size:11px;color:var(--muted)">${label}</span>
+      <textarea id="cf-${key}" rows="2" style="width:100%;padding:4px 8px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:12px">${v}</textarea>
+    </label>`;
+  }
+  return `<label style="display:block">
+    <span style="font-size:11px;color:var(--muted)">${label}</span>
+    <input id="cf-${key}" type="text" value="${v}" style="width:100%;padding:4px 8px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:12px">
+  </label>`;
+}
+
+function _readContactForm() {
+  return {
+    name:             $('cf-name').value.trim(),
+    phone:            $('cf-phone').value.trim(),
+    employer:         $('cf-employer').value.trim(),
+    title:            $('cf-title').value.trim(),
+    employer_address: $('cf-employer_address').value.trim(),
+    notes:            $('cf-notes').value.trim(),
+  };
+}
+
+async function saveContact() {
+  const payload = _readContactForm();
+  try {
+    if (_editingContactId == null) {
+      const newEmails = ($('cf-newemails').value || '')
+        .split(',').map(s => s.trim()).filter(Boolean);
+      payload.emails = newEmails;
+      const created = await api('/contacts', 'POST', payload);
+      _editingContactId = created.contact_id;
+    } else {
+      await api(`/contacts/${_editingContactId}`, 'PATCH', payload);
+    }
+    closeContactEditor();
+    loadContacts($('contactsSearch')?.value || '');
+  } catch (e) {
+    alert(`Save failed: ${e.message}`);
+  }
+}
+
+async function addContactEmail() {
+  const email = $('cf-newemail').value.trim();
+  if (!email || _editingContactId == null) return;
+  try {
+    await api(`/contacts/${_editingContactId}/emails`, 'POST', { email });
+    editContact(_editingContactId);
+  } catch (e) {
+    alert(`Add email failed: ${e.message}`);
+  }
+}
+
+async function removeContactEmail(email) {
+  if (_editingContactId == null) return;
+  if (!confirm(`Remove ${email} from this contact?`)) return;
+  try {
+    await api(`/contacts/${_editingContactId}/emails/${encodeURIComponent(email)}`, 'DELETE');
+    editContact(_editingContactId);
+  } catch (e) {
+    alert(`Remove failed: ${e.message}`);
+  }
+}
+
+async function deleteContact() {
+  if (_editingContactId == null) return;
+  if (!confirm('Delete this contact and all of its email associations?')) return;
+  try {
+    await api(`/contacts/${_editingContactId}`, 'DELETE');
+    closeContactEditor();
+    loadContacts($('contactsSearch')?.value || '');
+  } catch (e) {
+    alert(`Delete failed: ${e.message}`);
+  }
+}
+
+function closeContactEditor() {
+  _editingContactId = null;
+  $('contactsEditor').innerHTML = '';
+}
+
+async function rebuildContacts() {
+  if (!confirm('Rescan every existing item\'s To/CC/author headers and refresh the contacts table? Safe to run repeatedly.')) return;
+  try {
+    setStatus('rebuilding contacts');
+    const r = await api('/contacts/rebuild', 'POST');
+    setStatus('ready');
+    alert(`Rebuilt: scanned ${r.items_scanned} items, ${r.total_contacts} contacts in DB.`);
+    loadContacts($('contactsSearch')?.value || '');
+  } catch (e) {
+    setStatus('error');
+    alert(`Rebuild failed: ${e.message}`);
+  }
 }
 
 // ── Sidebar (mobile) ──────────────────────────────────────────────────────────

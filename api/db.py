@@ -334,6 +334,46 @@ def _create_schema(c: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_edges_dst  ON edges(dst_id, edge_type);
     CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(edge_type);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique ON edges(src_id, dst_id, edge_type);
+
+    -- ── Contacts tables ──────────────────────────────────────────────────────
+    --
+    -- Identity is a stable serial integer (contact_id), NOT an email or any
+    -- other field that can change when a person switches jobs or providers.
+    -- Emails live in a separate join table so a contact can carry multiple
+    -- addresses across employers without losing history.
+
+    CREATE TABLE IF NOT EXISTS contacts (
+        contact_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        name             TEXT    NOT NULL DEFAULT '',
+        phone            TEXT    NOT NULL DEFAULT '',
+        employer         TEXT    NOT NULL DEFAULT '',
+        title            TEXT    NOT NULL DEFAULT '',
+        employer_address TEXT    NOT NULL DEFAULT '',
+        notes            TEXT    NOT NULL DEFAULT '',
+        first_seen       TEXT,
+        last_seen        TEXT,
+        source_count     INTEGER NOT NULL DEFAULT 0,
+        last_item_id     TEXT,
+        is_manual        INTEGER NOT NULL DEFAULT 0,
+        created_at       TEXT,
+        updated_at       TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contacts_name      ON contacts(name);
+    CREATE INDEX IF NOT EXISTS idx_contacts_employer  ON contacts(employer);
+    CREATE INDEX IF NOT EXISTS idx_contacts_last_seen ON contacts(last_seen DESC);
+
+    CREATE TABLE IF NOT EXISTS contact_emails (
+        contact_id INTEGER NOT NULL,
+        email      TEXT    NOT NULL,
+        is_primary INTEGER NOT NULL DEFAULT 0,
+        added_at   TEXT,
+        PRIMARY KEY (contact_id, email),
+        FOREIGN KEY (contact_id) REFERENCES contacts(contact_id) ON DELETE CASCADE
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_emails_email ON contact_emails(email);
+    CREATE INDEX IF NOT EXISTS idx_contact_emails_contact ON contact_emails(contact_id);
     """)
 
 
@@ -1047,3 +1087,263 @@ def get_nodes_by_type(node_type: str) -> list[dict]:
     return _rows_to_list(
         conn().execute("SELECT * FROM nodes WHERE node_type = ?", (node_type,)).fetchall()
     )
+
+
+# ── Contacts operations ───────────────────────────────────────────────────────
+#
+# Identity is a stable serial integer (contact_id).  Emails live in the
+# contact_emails join table — every helper that returns a contact dict
+# attaches an "emails" key with the full list, primary first.
+
+def _attach_emails(contact: Optional[dict]) -> Optional[dict]:
+    """Attach the joined emails list to a contact dict (in place)."""
+    if not contact:
+        return contact
+    rows = conn().execute(
+        "SELECT email, is_primary FROM contact_emails "
+        "WHERE contact_id = ? ORDER BY is_primary DESC, added_at",
+        (contact["contact_id"],),
+    ).fetchall()
+    contact["emails"] = [r["email"] for r in rows]
+    contact["primary_email"] = next(
+        (r["email"] for r in rows if r["is_primary"]),
+        contact["emails"][0] if contact["emails"] else None,
+    )
+    return contact
+
+
+def get_contact(contact_id: int) -> Optional[dict]:
+    """Fetch a single contact by id, with emails attached."""
+    row = conn().execute(
+        "SELECT * FROM contacts WHERE contact_id = ?", (contact_id,)
+    ).fetchone()
+    return _attach_emails(_row_to_dict(row))
+
+
+def get_contact_by_email(email: str) -> Optional[dict]:
+    """Look up a contact by any of its email addresses (case-insensitive)."""
+    if not email:
+        return None
+    row = conn().execute(
+        "SELECT c.* FROM contacts c "
+        "JOIN contact_emails e ON e.contact_id = c.contact_id "
+        "WHERE LOWER(e.email) = LOWER(?)",
+        (email,),
+    ).fetchone()
+    return _attach_emails(_row_to_dict(row))
+
+
+def find_contacts_by_name(name: str) -> list[dict]:
+    """Substring (case-insensitive) match on contact name. Used by owner resolution."""
+    if not name:
+        return []
+    pattern = f"%{name.strip()}%"
+    rows = conn().execute(
+        "SELECT * FROM contacts WHERE LOWER(name) LIKE LOWER(?) "
+        "ORDER BY source_count DESC, last_seen DESC",
+        (pattern,),
+    ).fetchall()
+    return [_attach_emails(dict(r)) for r in rows]
+
+
+def list_contacts(query: Optional[str] = None, limit: int = 500) -> list[dict]:
+    """Return contacts ordered by most-recently-seen, optionally filtered.
+
+    `query` matches against name, employer, title, or any associated email
+    (case-insensitive substring).
+    """
+    c = conn()
+    if query:
+        pattern = f"%{query.strip()}%"
+        rows = c.execute(
+            "SELECT DISTINCT c.* FROM contacts c "
+            "LEFT JOIN contact_emails e ON e.contact_id = c.contact_id "
+            "WHERE LOWER(c.name)     LIKE LOWER(?) "
+            "   OR LOWER(c.employer) LIKE LOWER(?) "
+            "   OR LOWER(c.title)    LIKE LOWER(?) "
+            "   OR LOWER(e.email)    LIKE LOWER(?) "
+            "ORDER BY c.last_seen DESC, c.contact_id DESC LIMIT ?",
+            (pattern, pattern, pattern, pattern, limit),
+        ).fetchall()
+    else:
+        rows = c.execute(
+            "SELECT * FROM contacts ORDER BY last_seen DESC, contact_id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [_attach_emails(dict(r)) for r in rows]
+
+
+def count_contacts() -> int:
+    """Return total contact count."""
+    return conn().execute("SELECT COUNT(*) FROM contacts").fetchone()[0]
+
+
+def insert_contact(data: dict) -> int:
+    """Insert a new contact row and return its assigned contact_id.
+
+    `data` may contain any contact column plus an optional "emails" list.
+    Emails are inserted into contact_emails; the first becomes primary.
+    """
+    c = conn()
+    now = _now_iso()
+    payload = {
+        "name":             data.get("name", "") or "",
+        "phone":            data.get("phone", "") or "",
+        "employer":         data.get("employer", "") or "",
+        "title":            data.get("title", "") or "",
+        "employer_address": data.get("employer_address", "") or "",
+        "notes":            data.get("notes", "") or "",
+        "first_seen":       data.get("first_seen") or now,
+        "last_seen":        data.get("last_seen")  or now,
+        "source_count":     data.get("source_count", 0),
+        "last_item_id":     data.get("last_item_id"),
+        "is_manual":        1 if data.get("is_manual") else 0,
+        "created_at":       now,
+        "updated_at":       now,
+    }
+    cols   = list(payload.keys())
+    values = [payload[k] for k in cols]
+    placeholders = ", ".join("?" * len(cols))
+    col_names    = ", ".join(f'"{k}"' for k in cols)
+    cur = c.execute(
+        f"INSERT INTO contacts ({col_names}) VALUES ({placeholders})",
+        values,
+    )
+    contact_id = cur.lastrowid
+
+    emails = data.get("emails") or []
+    for idx, email in enumerate(emails):
+        if not email:
+            continue
+        try:
+            c.execute(
+                "INSERT INTO contact_emails (contact_id, email, is_primary, added_at) "
+                "VALUES (?, ?, ?, ?)",
+                (contact_id, email.lower(), 1 if idx == 0 else 0, now),
+            )
+        except sqlite3.IntegrityError:
+            # email already attached to a different contact — skip
+            pass
+    return contact_id
+
+
+def update_contact(contact_id: int, updates: dict) -> None:
+    """Apply a partial update to a contact row.  Ignores unknown columns."""
+    if not updates:
+        return
+    allowed = {
+        "name", "phone", "employer", "title", "employer_address", "notes",
+        "first_seen", "last_seen", "source_count", "last_item_id", "is_manual",
+    }
+    clean = {k: v for k, v in updates.items() if k in allowed}
+    if not clean:
+        return
+    clean["updated_at"] = _now_iso()
+    set_clause = ", ".join(f'"{k}" = ?' for k in clean)
+    values     = list(clean.values()) + [contact_id]
+    conn().execute(
+        f"UPDATE contacts SET {set_clause} WHERE contact_id = ?", values
+    )
+
+
+def delete_contact(contact_id: int) -> None:
+    """Delete a contact and all its emails (cascade via FK)."""
+    conn().execute("DELETE FROM contacts WHERE contact_id = ?", (contact_id,))
+
+
+def add_contact_email(contact_id: int, email: str, is_primary: bool = False) -> bool:
+    """Attach an email to a contact.  Returns False if the email is already
+    attached to another contact (caller can decide whether to merge)."""
+    if not email:
+        return False
+    c = conn()
+    email = email.lower()
+    existing = c.execute(
+        "SELECT contact_id FROM contact_emails WHERE LOWER(email) = ?",
+        (email,),
+    ).fetchone()
+    if existing:
+        return existing["contact_id"] == contact_id
+    if is_primary:
+        c.execute(
+            "UPDATE contact_emails SET is_primary = 0 WHERE contact_id = ?",
+            (contact_id,),
+        )
+    c.execute(
+        "INSERT INTO contact_emails (contact_id, email, is_primary, added_at) "
+        "VALUES (?, ?, ?, ?)",
+        (contact_id, email, 1 if is_primary else 0, _now_iso()),
+    )
+    return True
+
+
+def remove_contact_email(contact_id: int, email: str) -> None:
+    """Detach an email from a contact."""
+    conn().execute(
+        "DELETE FROM contact_emails WHERE contact_id = ? AND LOWER(email) = LOWER(?)",
+        (contact_id, email),
+    )
+
+
+def upsert_contact_from_header(
+    display_name: str,
+    email: str,
+    item_id: Optional[str] = None,
+    item_timestamp: Optional[str] = None,
+) -> int:
+    """Idempotently record a contact seen in an email header.
+
+    Lookup is by email (the only stable thing we have in a header).  When the
+    email is new, a contact is created using the display name.  When the email
+    already exists, source_count and last_seen are bumped, and the name is
+    filled in if it was previously empty.
+
+    Returns the contact_id.
+    """
+    c = conn()
+    now = _now_iso()
+    seen_at = item_timestamp or now
+    email_lc = (email or "").strip().lower()
+    if not email_lc:
+        # No email — fall back to a name-only contact (rare; e.g. just author).
+        cur = c.execute(
+            "INSERT INTO contacts (name, first_seen, last_seen, source_count, "
+            "last_item_id, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?)",
+            (display_name or "", seen_at, seen_at, item_id, now, now),
+        )
+        return cur.lastrowid
+
+    existing = c.execute(
+        "SELECT c.* FROM contacts c "
+        "JOIN contact_emails e ON e.contact_id = c.contact_id "
+        "WHERE LOWER(e.email) = ?",
+        (email_lc,),
+    ).fetchone()
+
+    if existing:
+        contact_id = existing["contact_id"]
+        # Bump counters and last_seen; fill in name if missing.
+        new_name = existing["name"] or (display_name or "").strip()
+        first_seen = min(existing["first_seen"] or seen_at, seen_at)
+        last_seen  = max(existing["last_seen"]  or seen_at, seen_at)
+        c.execute(
+            "UPDATE contacts SET name = ?, first_seen = ?, last_seen = ?, "
+            "source_count = source_count + 1, last_item_id = ?, updated_at = ? "
+            "WHERE contact_id = ?",
+            (new_name, first_seen, last_seen, item_id, now, contact_id),
+        )
+        return contact_id
+
+    # New contact.
+    cur = c.execute(
+        "INSERT INTO contacts (name, first_seen, last_seen, source_count, "
+        "last_item_id, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?)",
+        ((display_name or "").strip(), seen_at, seen_at, item_id, now, now),
+    )
+    contact_id = cur.lastrowid
+    c.execute(
+        "INSERT INTO contact_emails (contact_id, email, is_primary, added_at) "
+        "VALUES (?, ?, 1, ?)",
+        (contact_id, email_lc, now),
+    )
+    return contact_id

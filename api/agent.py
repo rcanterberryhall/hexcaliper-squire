@@ -948,6 +948,126 @@ def build_prompt(item: RawItem) -> str:
     )
 
 
+def build_analysis_from_llm_json(
+    item: RawItem,
+    llm_json_text: str,
+    *,
+    scope_info: dict,
+) -> Analysis:
+    """
+    Parse an LLM JSON response and build a fully populated ``Analysis``.
+
+    Shared by :func:`analyze` (sync path) and the batch poll path in
+    :mod:`orchestrator` so the two cannot drift.  Applies every deterministic
+    override the sync path applies:
+
+    - ``postprocess_action_items`` (recipient-scope safety net)
+    - ``_detect_quarantine_noise`` (quarantine digests → noise)
+    - ``fyi`` / ``noise`` clears any action items the LLM returned
+    - Jira fallback (open tickets always get a "Work on: …" action item)
+    - ``_detect_passdown`` (deterministic shift handoff detection)
+    - ``_validated_project_tags`` (drops invented project names)
+    - Both ``project_tags`` (plural) and ``project_tag`` (singular) keys
+
+    The caller is responsible for computing ``scope_info`` from the item's
+    To/CC fields and (in the sync path) for surfacing it as a prompt hint.
+
+    Reads from ``item.metadata``:
+        ``to``, ``cc``, ``is_replied``, ``replied_at``, ``hierarchy``,
+        ``direction``, ``conversation_id``, ``conversation_topic``,
+        ``project_tag``, ``due``.
+
+    :param item: The raw item that was analysed.
+    :param llm_json_text: Raw LLM response text (will be tolerantly parsed).
+    :param scope_info: Result of :func:`compute_recipient_scope`.
+    :return: A populated ``Analysis`` instance.
+    """
+    try:
+        data = json.loads(llm_json_text or "{}")
+    except json.JSONDecodeError:
+        data = {}
+
+    action_items = [
+        ActionItem(
+            description = a.get("description", ""),
+            deadline    = a.get("deadline"),
+            owner       = a.get("owner", "me"),
+        )
+        for a in data.get("action_items", [])
+        if a.get("description")
+    ]
+
+    # Recipient-scope safety net: in group/broadcast emails where the user
+    # is not named in the body, strip owner="me" false positives.  Items
+    # assigned to OTHER named people are always preserved so delegated-work
+    # tracking continues to work.
+    action_items = postprocess_action_items(
+        action_items, scope_info, item.body,
+        config.USER_NAME or "", config.USER_EMAIL or "",
+    )
+
+    information_items = [
+        {"fact": i.get("fact", ""), "relevance": i.get("relevance", "")}
+        for i in data.get("information_items", [])
+        if i.get("fact")
+    ]
+
+    category  = data.get("category", "fyi")
+    task_type = data.get("task_type")  # "reply" | "review" | None
+
+    # Deterministic override: quarantine digest with unknown sender → always noise.
+    if _detect_quarantine_noise(item):
+        category = "noise"
+
+    if category in ("fyi", "noise"):
+        action_items = []
+
+    # Jira fallback — always surface open tickets even if the LLM returns sparse
+    # output or assigns category=fyi.  Must run after the fyi-clear above.
+    if item.source == "jira" and not action_items:
+        action_items = [ActionItem(
+            description = f"Work on: {item.title}",
+            deadline    = item.metadata.get("due"),
+            owner       = "me",
+        )]
+
+    return Analysis(
+        item_id           = item.item_id,
+        source            = item.source,
+        title             = item.title,
+        author            = item.author,
+        timestamp         = item.timestamp,
+        url               = item.url,
+        category          = category,
+        task_type         = task_type,
+        has_action        = bool(action_items),
+        priority          = data.get("priority", "medium"),
+        action_items      = action_items,
+        summary           = data.get("summary", item.title),
+        urgency_reason    = data.get("urgency_reason"),
+        hierarchy         = data.get("hierarchy", item.metadata.get("hierarchy", "general")),
+        is_passdown       = _detect_passdown(item.title, item.body) or bool(data.get("is_passdown", False)),
+        project_tag       = db.serialize_project_tags(
+                               _validated_project_tags(
+                                   data.get("project_tags")
+                                   or data.get("project_tag")
+                                   or item.metadata.get("project_tag")
+                               )
+                           ),
+        direction         = item.metadata.get("direction", "received"),
+        conversation_id   = item.metadata.get("conversation_id"),
+        conversation_topic = item.metadata.get("conversation_topic"),
+        goals             = [g for g in data.get("goals", []) if isinstance(g, str) and g],
+        key_dates         = [d for d in data.get("key_dates", []) if isinstance(d, dict)],
+        body_preview      = _strip_caution(item.body)[:2000],
+        to_field          = item.metadata.get("to", ""),
+        cc_field          = item.metadata.get("cc", ""),
+        is_replied        = bool(item.metadata.get("is_replied", False)),
+        replied_at        = item.metadata.get("replied_at"),
+        information_items = information_items,
+    )
+
+
 def analyze(item: RawItem) -> Analysis:
     """
     Send a single item to Ollama and parse the structured JSON response.
@@ -1088,89 +1208,7 @@ def analyze(item: RawItem) -> Analysis:
         format="json", temperature=0.1, num_predict=768, timeout=90,
     )
 
-    try:
-        data = json.loads(text or "{}")
-    except json.JSONDecodeError:
-        data = {}
-
-    action_items = [
-        ActionItem(
-            description = a.get("description", ""),
-            deadline    = a.get("deadline"),
-            owner       = a.get("owner", "me"),
-        )
-        for a in data.get("action_items", [])
-        if a.get("description")
-    ]
-
-    # Recipient-scope safety net: in group/broadcast emails where the user
-    # is not named in the body, strip owner="me" false positives.  Items
-    # assigned to OTHER named people are always preserved so delegated-work
-    # tracking continues to work.
-    action_items = postprocess_action_items(
-        action_items, scope_info, item.body,
-        config.USER_NAME or "", config.USER_EMAIL or "",
-    )
-
-    information_items = [
-        {"fact": i.get("fact", ""), "relevance": i.get("relevance", "")}
-        for i in data.get("information_items", [])
-        if i.get("fact")
-    ]
-
-    category  = data.get("category", "fyi")
-    task_type = data.get("task_type")  # "reply" | "review" | None
-
-    # Deterministic override: quarantine digest with unknown sender → always noise.
-    if _detect_quarantine_noise(item):
-        category = "noise"
-
-    action_items = action_items if category not in ("fyi", "noise") else []
-
-    # Jira fallback — always surface open tickets even if the LLM returns sparse
-    # output or assigns category=fyi.  Must run after the fyi-clear above.
-    if item.source == "jira" and not action_items:
-        action_items = [ActionItem(
-            description = f"Work on: {item.title}",
-            deadline    = item.metadata.get("due"),
-            owner       = "me",
-        )]
-
-    return Analysis(
-        item_id           = item.item_id,
-        source            = item.source,
-        title             = item.title,
-        author            = item.author,
-        timestamp         = item.timestamp,
-        url               = item.url,
-        category          = category,
-        task_type         = task_type,
-        has_action        = bool(action_items),
-        priority          = data.get("priority", "medium"),
-        action_items      = action_items,
-        summary           = data.get("summary", item.title),
-        urgency_reason    = data.get("urgency_reason"),
-        hierarchy         = data.get("hierarchy", item.metadata.get("hierarchy", "general")),
-        is_passdown       = _detect_passdown(item.title, item.body) or bool(data.get("is_passdown", False)),
-        project_tag       = db.serialize_project_tags(
-                               _validated_project_tags(
-                                   data.get("project_tags")
-                                   or data.get("project_tag")
-                                   or item.metadata.get("project_tag")
-                               )
-                           ),
-        direction         = item.metadata.get("direction", "received"),
-        conversation_id   = item.metadata.get("conversation_id"),
-        conversation_topic = item.metadata.get("conversation_topic"),
-        goals             = [g for g in data.get("goals", []) if isinstance(g, str) and g],
-        key_dates         = [d for d in data.get("key_dates", []) if isinstance(d, dict)],
-        body_preview      = _strip_caution(item.body)[:2000],
-        to_field          = to_field,
-        cc_field          = cc_field,
-        is_replied        = is_replied,
-        replied_at        = replied_at,
-        information_items = information_items,
-    )
+    return build_analysis_from_llm_json(item, text, scope_info=scope_info)
 
 
 def analyze_batch(items: list[RawItem], progress_cb=None) -> list[Analysis]:

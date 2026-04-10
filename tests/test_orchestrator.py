@@ -293,6 +293,180 @@ def test_run_reanalyze_deletes_stale_todos_before_reinserting():
     assert all_todos[0]["description"] == "new action"
 
 
+# ── _poll_batch_once (batch result application) ──────────────────────────────
+
+def _seed_pending_batch(item_id="b1", job_id="job1", source="outlook",
+                        title="Pending item", to_field="user@co.com",
+                        cc_field=""):
+    """Insert an item with a batch_job_id set, mimicking a row that submitted
+    its prompt to merLLM and is awaiting the result."""
+    analyses.insert({
+        "item_id":      item_id,
+        "source":       source,
+        "title":        title,
+        "author":       "boss@co.com",
+        "timestamp":    "2026-04-10T10:00:00+00:00",
+        "url":          "",
+        "body_preview": "please ship the release today",
+        "priority":     "low",
+        "category":     "fyi",
+        "has_action":   False,
+        "is_passdown":  False,
+        "project_tag":  None,
+        "hierarchy":    "general",
+        "to_field":     to_field,
+        "cc_field":     cc_field,
+        "is_replied":   False,
+        "replied_at":   None,
+        "batch_job_id": job_id,
+    })
+
+
+def _merllm_ok_response(payload: dict) -> MagicMock:
+    import json as _json
+    m = MagicMock()
+    m.status_code = 200
+    m.json.return_value = {"result": _json.dumps(payload)}
+    m.raise_for_status.return_value = None
+    return m
+
+
+def test_poll_batch_once_applies_completed_result():
+    """Happy path: a 200 response with valid LLM JSON updates the item,
+    clears batch_job_id, and persists the new analysis fields."""
+    _seed_pending_batch(item_id="b1", job_id="job-success")
+
+    payload = {
+        "has_action": True, "priority": "high", "category": "task",
+        "task_type": "review",
+        "action_items": [{"description": "Ship the release", "deadline": None, "owner": "me"}],
+        "summary": "Ship the release", "urgency_reason": "deadline today",
+    }
+
+    with patch("orchestrator.http_requests.get", return_value=_merllm_ok_response(payload)), \
+         patch("orchestrator._spawn_situation_task"):
+        orchestrator._poll_batch_once()
+
+    row = analyses.get(Q.item_id == "b1")
+    assert row is not None
+    assert row["batch_job_id"] is None  # cleared on success
+    assert row["priority"] == "high"
+    assert row["category"] == "task"
+    assert row["has_action"] in (True, 1)
+
+
+def test_poll_batch_once_clears_job_id_on_malformed_payload():
+    """Critical regression guard for #26: a malformed result must NOT wedge
+    the item forever.  The job id is cleared so the next reanalyze run can
+    pick the item back up."""
+    _seed_pending_batch(item_id="b2", job_id="job-bad")
+
+    bad = MagicMock()
+    bad.status_code = 200
+    bad.json.return_value = {"result": "{not valid json"}
+    bad.raise_for_status.return_value = None
+
+    with patch("orchestrator.http_requests.get", return_value=bad), \
+         patch("orchestrator._spawn_situation_task"):
+        # Even with bad JSON, the helper now treats it as defaults — so this
+        # is actually a *successful* apply with empty fields.  Either way the
+        # item must not be left wedged with the old job id.
+        orchestrator._poll_batch_once()
+
+    row = analyses.get(Q.item_id == "b2")
+    assert row["batch_job_id"] is None
+
+
+def test_poll_batch_once_clears_job_id_when_save_fails():
+    """If the save/index/spawn step itself raises (not the JSON parse), the
+    exception handler must still clear batch_job_id to unstick the item."""
+    _seed_pending_batch(item_id="b3", job_id="job-save-fail")
+
+    payload = {"category": "task", "priority": "medium"}
+
+    with patch("orchestrator.http_requests.get", return_value=_merllm_ok_response(payload)), \
+         patch("orchestrator.graph.index_item", side_effect=RuntimeError("graph down")), \
+         patch("orchestrator._spawn_situation_task"):
+        orchestrator._poll_batch_once()
+
+    row = analyses.get(Q.item_id == "b3")
+    assert row["batch_job_id"] is None  # unstuck even on save failure
+
+
+def test_poll_batch_once_clears_job_id_on_404():
+    """merLLM doesn't know the job (e.g. its DB was wiped) → clear so the
+    item is picked up by the next direct reanalyze run."""
+    _seed_pending_batch(item_id="b4", job_id="job-missing")
+
+    not_found = MagicMock()
+    not_found.status_code = 404
+    not_found.json.return_value = {"detail": "not found"}
+
+    with patch("orchestrator.http_requests.get", return_value=not_found):
+        orchestrator._poll_batch_once()
+
+    row = analyses.get(Q.item_id == "b4")
+    assert row["batch_job_id"] is None
+
+
+def test_poll_batch_once_keeps_job_id_when_still_running():
+    """409 with detail containing 'queued'/'running' → keep waiting."""
+    _seed_pending_batch(item_id="b5", job_id="job-running")
+
+    running = MagicMock()
+    running.status_code = 409
+    running.json.return_value = {"detail": "job is still running"}
+
+    with patch("orchestrator.http_requests.get", return_value=running):
+        orchestrator._poll_batch_once()
+
+    row = analyses.get(Q.item_id == "b5")
+    assert row["batch_job_id"] == "job-running"  # still pending
+
+
+def test_poll_batch_once_clears_job_id_on_409_failed():
+    """409 with detail containing 'failed' → merLLM gave up; clear so the
+    next reanalyze run picks the item back up directly."""
+    _seed_pending_batch(item_id="b6", job_id="job-failed")
+
+    failed = MagicMock()
+    failed.status_code = 409
+    failed.json.return_value = {"detail": "job failed"}
+
+    with patch("orchestrator.http_requests.get", return_value=failed):
+        orchestrator._poll_batch_once()
+
+    row = analyses.get(Q.item_id == "b6")
+    assert row["batch_job_id"] is None
+
+
+def test_poll_batch_once_uses_shared_helper(monkeypatch):
+    """Smoke test: confirm the batch path actually calls
+    agent.build_analysis_from_llm_json (proves the import is wired up
+    correctly and we never silently fall back to the old hand-rolled path)."""
+    _seed_pending_batch(item_id="b7", job_id="job-helper")
+
+    import agent
+    real_helper = agent.build_analysis_from_llm_json
+    calls = []
+
+    def spy(item, text, *, scope_info):
+        calls.append((item.item_id, scope_info["scope"]))
+        return real_helper(item, text, scope_info=scope_info)
+
+    monkeypatch.setattr(agent, "build_analysis_from_llm_json", spy)
+
+    payload = {"category": "task", "priority": "medium",
+               "action_items": [{"description": "do thing", "owner": "me"}]}
+
+    with patch("orchestrator.http_requests.get", return_value=_merllm_ok_response(payload)), \
+         patch("orchestrator._spawn_situation_task"):
+        orchestrator._poll_batch_once()
+
+    assert len(calls) == 1
+    assert calls[0][0] == "b7"
+
+
 def test_run_reanalyze_sorts_passdowns_first():
     """Passdown items must appear first in the analysis call order regardless of
     their timestamp."""

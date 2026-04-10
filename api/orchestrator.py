@@ -152,10 +152,71 @@ def _submit_batch_job(prompt: str) -> str | None:
         return None
 
 
-def _poll_batch_jobs() -> None:
+def _raw_item_from_record(rec: dict) -> RawItem:
     """
-    Background thread: every 60 s poll merLLM for completed batch jobs and
-    apply their results to the corresponding items.
+    Reconstruct a minimal ``RawItem`` from a stored DB record.
+
+    Used by the batch poll path so it can feed the same
+    :func:`agent.build_analysis_from_llm_json` helper that the sync path uses.
+    The body is taken from the already-stripped ``body_preview`` (idempotent
+    under ``_strip_caution``), and metadata is populated with every field the
+    helper reads.
+    """
+    return RawItem(
+        source    = rec.get("source", "") or "",
+        item_id   = rec["item_id"],
+        title     = rec.get("title", "") or "",
+        body      = rec.get("body_preview", "") or "",
+        url       = rec.get("url", "") or "",
+        author    = rec.get("author", "") or "",
+        timestamp = rec.get("timestamp") or _now_iso(),
+        metadata  = {
+            "to":                 rec.get("to_field", "") or "",
+            "cc":                 rec.get("cc_field", "") or "",
+            "is_replied":         bool(rec.get("is_replied", False)),
+            "replied_at":         rec.get("replied_at"),
+            "hierarchy":          rec.get("hierarchy", "general") or "general",
+            "direction":          rec.get("direction", "received") or "received",
+            "conversation_id":    rec.get("conversation_id"),
+            "conversation_topic": rec.get("conversation_topic"),
+            "project_tag":        rec.get("project_tag"),
+        },
+    )
+
+
+def _apply_batch_result(rec: dict, response_text: str) -> None:
+    """
+    Apply a completed batch LLM result to a stored item.
+
+    Parses the LLM JSON via :func:`agent.build_analysis_from_llm_json`,
+    re-saves the analysis, indexes it into the graph, spawns the situation
+    task, and clears ``batch_job_id``.
+
+    Raised exceptions are caller's responsibility — the caller decides whether
+    to clear ``batch_job_id`` to unstick the item or leave it for retry.
+    """
+    from agent import build_analysis_from_llm_json, compute_recipient_scope
+
+    raw = _raw_item_from_record(rec)
+    scope_info = compute_recipient_scope(
+        config.USER_EMAIL or "",
+        raw.metadata.get("to", ""),
+        raw.metadata.get("cc", ""),
+    )
+    result = build_analysis_from_llm_json(raw, response_text, scope_info=scope_info)
+
+    _save_analysis(result, reanalyze=True)
+    graph.index_item(result)
+    _spawn_situation_task(result.item_id)
+    with db.lock:
+        db.set_batch_job_id(rec["item_id"], None)
+
+
+def _poll_batch_once() -> None:
+    """
+    One iteration of the batch poll loop.  Extracted from
+    :func:`_poll_batch_jobs` so tests can drive it directly without spawning
+    a thread.
 
     Status handling:
       200            — job complete; parse and apply result
@@ -163,120 +224,70 @@ def _poll_batch_jobs() -> None:
       409 failed     — merLLM failed the job; clear batch_job_id so the
                        item is picked up by the next direct reanalyze run
       404            — job unknown to merLLM (e.g. DB wiped); clear and retry
+
+    A parse/apply failure clears ``batch_job_id`` so a malformed result does
+    not wedge the item forever.  The next reanalyze run will pick it up.
+    """
+    with db.lock:
+        pending = db.get_items_with_pending_batch()
+
+    for rec in pending:
+        job_id = rec.get("batch_job_id")
+        if not job_id:
+            continue
+
+        # ── Fetch result from merLLM ──────────────────────────────────────
+        try:
+            r = http_requests.get(
+                f"{config.MERLLM_URL}/api/batch/results/{job_id}",
+                timeout=10,
+            )
+            if r.status_code == 404:
+                log.warning("batch job %s not found in merLLM — clearing for retry", job_id)
+                with db.lock:
+                    db.set_batch_job_id(rec["item_id"], None)
+                continue
+            if r.status_code == 409:
+                detail = r.json().get("detail", "")
+                if "failed" in detail:
+                    log.warning("batch job %s failed in merLLM — clearing for retry", job_id)
+                    with db.lock:
+                        db.set_batch_job_id(rec["item_id"], None)
+                # queued or running — still in progress, keep waiting
+                continue
+            r.raise_for_status()
+            data = r.json()
+            response_text = data.get("result", "")
+            if not response_text:
+                continue
+        except Exception as e:
+            log.error("batch poll %s: %s", job_id, e)
+            continue
+
+        # ── Parse and apply via shared helper ─────────────────────────────
+        try:
+            _apply_batch_result(rec, response_text)
+            log.info("batch applied result for %s (job %s)", rec["item_id"], job_id)
+        except Exception as e:
+            # Clear the job id so a malformed payload does not wedge the item
+            # forever — the next reanalyze run will pick it up.
+            log.error("batch apply %s: %s — clearing job id to unstick item", job_id, e)
+            try:
+                with db.lock:
+                    db.set_batch_job_id(rec["item_id"], None)
+            except Exception as clear_err:
+                log.error("failed to clear stuck batch_job_id for %s: %s", rec["item_id"], clear_err)
+
+
+def _poll_batch_jobs() -> None:
+    """
+    Background thread: every 60 s call :func:`_poll_batch_once` to poll
+    merLLM for completed batch jobs and apply their results.
     """
     while True:
         time.sleep(60)
         try:
-            with db.lock:
-                pending = db.get_items_with_pending_batch()
-            for rec in pending:
-                job_id = rec.get("batch_job_id")
-                if not job_id:
-                    continue
-                try:
-                    r = http_requests.get(
-                        f"{config.MERLLM_URL}/api/batch/results/{job_id}",
-                        timeout=10,
-                    )
-                    if r.status_code == 404:
-                        # Job unknown — clear so item is retried on next reanalyze
-                        log.warning("batch job %s not found in merLLM — clearing for retry", job_id)
-                        with db.lock:
-                            db.set_batch_job_id(rec["item_id"], None)
-                        continue
-                    if r.status_code == 409:
-                        detail = r.json().get("detail", "")
-                        if "failed" in detail:
-                            log.warning("batch job %s failed in merLLM — clearing for retry", job_id)
-                            with db.lock:
-                                db.set_batch_job_id(rec["item_id"], None)
-                        # queued or running — still in progress, keep waiting
-                        continue
-                    r.raise_for_status()
-                    data = r.json()
-                    response_text = data.get("result", "")
-                    if not response_text:
-                        continue
-                except Exception as e:
-                    log.error("batch poll %s: %s", job_id, e)
-                    continue
-
-                # Parse the LLM response and re-save the item
-                try:
-                    import json as _json
-                    from agent import (
-                        _detect_passdown, _validated_project_tag,
-                        _detect_quarantine_noise,
-                        compute_recipient_scope, postprocess_action_items,
-                    )
-                    from models import Analysis, ActionItem
-                    parsed = _json.loads(response_text)
-                    action_items = [
-                        ActionItem(
-                            description=a.get("description", ""),
-                            deadline=a.get("deadline"),
-                            owner=a.get("owner", "me"),
-                        )
-                        for a in parsed.get("action_items", [])
-                        if a.get("description")
-                    ]
-                    # Recipient-scope safety net — matches analyze()'s behaviour
-                    # so batch and sync paths stay consistent.
-                    _scope_info = compute_recipient_scope(
-                        config.USER_EMAIL or "",
-                        rec.get("to_field", ""),
-                        rec.get("cc_field", ""),
-                    )
-                    action_items = postprocess_action_items(
-                        action_items, _scope_info, rec.get("body_preview", ""),
-                        config.USER_NAME or "", config.USER_EMAIL or "",
-                    )
-                    category = parsed.get("category", "fyi")
-                    if category in ("fyi", "noise"):
-                        action_items = []
-                    result = Analysis(
-                        item_id           = rec["item_id"],
-                        source            = rec.get("source", ""),
-                        title             = rec.get("title", ""),
-                        author            = rec.get("author", ""),
-                        timestamp         = rec.get("timestamp", _now_iso()),
-                        url               = rec.get("url", ""),
-                        category          = category,
-                        task_type         = parsed.get("task_type"),
-                        has_action        = bool(action_items),
-                        priority          = parsed.get("priority", "medium"),
-                        action_items      = action_items,
-                        summary           = parsed.get("summary", rec.get("title", "")),
-                        urgency_reason    = parsed.get("urgency_reason"),
-                        hierarchy         = parsed.get("hierarchy", rec.get("hierarchy", "general")),
-                        is_passdown       = bool(parsed.get("is_passdown", rec.get("is_passdown", False))),
-                        project_tag       = _validated_project_tag(
-                                               parsed.get("project_tag") or rec.get("project_tag")
-                                           ),
-                        direction         = rec.get("direction", "received"),
-                        conversation_id   = rec.get("conversation_id"),
-                        conversation_topic = rec.get("conversation_topic"),
-                        goals             = [g for g in parsed.get("goals", []) if isinstance(g, str) and g],
-                        key_dates         = [d for d in parsed.get("key_dates", []) if isinstance(d, dict)],
-                        body_preview      = rec.get("body_preview", ""),
-                        to_field          = rec.get("to_field", ""),
-                        cc_field          = rec.get("cc_field", ""),
-                        is_replied        = bool(rec.get("is_replied", False)),
-                        replied_at        = rec.get("replied_at"),
-                        information_items = [
-                            {"fact": i.get("fact", ""), "relevance": i.get("relevance", "")}
-                            for i in parsed.get("information_items", [])
-                            if i.get("fact")
-                        ],
-                    )
-                    _save_analysis(result, reanalyze=True)
-                    graph.index_item(result)
-                    _spawn_situation_task(result.item_id)
-                    with db.lock:
-                        db.set_batch_job_id(rec["item_id"], None)
-                    log.info("batch applied result for %s (job %s)", rec['item_id'], job_id)
-                except Exception as e:
-                    log.error("batch apply %s: %s", job_id, e)
+            _poll_batch_once()
         except Exception as e:
             log.error("batch poll loop error: %s", e)
 

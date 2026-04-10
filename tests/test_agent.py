@@ -262,3 +262,208 @@ class TestPostprocessActionItems:
             "Alice Smith", "alice.smith@co.com",
         )
         assert len(r) == 1
+
+
+# ── build_analysis_from_llm_json (shared helper) ──────────────────────────────
+
+class TestBuildAnalysisFromLlmJson:
+    """The shared helper used by both analyze() (sync path) and the
+    orchestrator batch poll path.  These tests pin down behaviour the two
+    paths must agree on, so they cannot drift again."""
+
+    def _direct_scope(self):
+        return {
+            "scope": "direct", "to_count": 1, "cc_count": 0, "total": 1,
+            "dls": [], "user_in_to": True, "user_in_cc": False,
+        }
+
+    def _broadcast_scope(self):
+        return {
+            "scope": "broadcast", "to_count": 0, "cc_count": 0, "total": 12,
+            "dls": [], "user_in_to": False, "user_in_cc": False,
+        }
+
+    def test_full_payload_populates_every_field(self):
+        item = RawItem(
+            source="outlook", item_id="x1", title="Ship the release",
+            body="please ship today", url="http://x", author="bob@co.com",
+            timestamp="2026-04-10T10:00:00+00:00",
+            metadata={"to": "user@co.com", "cc": "", "is_replied": False,
+                      "hierarchy": "general", "direction": "received"},
+        )
+        payload = {
+            "has_action": True, "priority": "high", "category": "task",
+            "task_type": "review",
+            "action_items": [{"description": "Ship it", "deadline": "2026-04-11", "owner": "me"}],
+            "summary": "Ship the release",
+            "urgency_reason": "deadline today",
+            "hierarchy": "personal",
+            "is_passdown": False,
+            "goals": ["release"], "key_dates": [{"label": "ship", "date": "2026-04-11"}],
+            "information_items": [{"fact": "v2.1 ready", "relevance": "release"}],
+        }
+        result = agent.build_analysis_from_llm_json(
+            item, json.dumps(payload), scope_info=self._direct_scope(),
+        )
+        assert result.priority == "high"
+        assert result.category == "task"
+        assert result.task_type == "review"
+        assert result.summary == "Ship the release"
+        assert result.hierarchy == "personal"
+        assert len(result.action_items) == 1
+        assert result.action_items[0].description == "Ship it"
+        assert result.goals == ["release"]
+        assert len(result.information_items) == 1
+
+    def test_empty_payload_uses_defaults(self):
+        item = RawItem(
+            source="outlook", item_id="x2", title="Fallback title",
+            body="", url="", author="", timestamp="2026-04-10T10:00:00+00:00",
+        )
+        result = agent.build_analysis_from_llm_json(
+            item, "{}", scope_info=self._direct_scope(),
+        )
+        assert result.priority == "medium"
+        assert result.category == "fyi"
+        assert result.summary == "Fallback title"
+        assert result.action_items == []
+
+    def test_malformed_json_uses_defaults(self):
+        item = RawItem(
+            source="outlook", item_id="x3", title="t", body="", url="",
+            author="", timestamp="2026-04-10T10:00:00+00:00",
+        )
+        result = agent.build_analysis_from_llm_json(
+            item, "{not json", scope_info=self._direct_scope(),
+        )
+        assert result.priority == "medium"
+        assert result.category == "fyi"
+        assert result.action_items == []
+
+    def test_jira_fallback_creates_action_item(self):
+        item = RawItem(
+            source="jira", item_id="PROJ-99", title="Fix login bug",
+            body="", url="", author="", timestamp="2026-04-10T10:00:00+00:00",
+            metadata={"due": "2026-04-15"},
+        )
+        result = agent.build_analysis_from_llm_json(
+            item, "{}", scope_info=self._direct_scope(),
+        )
+        assert len(result.action_items) == 1
+        assert "Fix login bug" in result.action_items[0].description
+        assert result.action_items[0].deadline == "2026-04-15"
+
+    def test_fyi_clears_action_items(self):
+        item = RawItem(
+            source="outlook", item_id="x4", title="t", body="", url="",
+            author="", timestamp="2026-04-10T10:00:00+00:00",
+        )
+        payload = {
+            "category": "fyi",
+            "action_items": [{"description": "Hallucinated task", "owner": "me"}],
+        }
+        result = agent.build_analysis_from_llm_json(
+            item, json.dumps(payload), scope_info=self._direct_scope(),
+        )
+        assert result.action_items == []
+        assert result.has_action is False
+
+    def test_passdown_detected_from_title(self):
+        item = RawItem(
+            source="outlook", item_id="p1", title="Day shift passdown",
+            body="see notes below", url="", author="ops@co.com",
+            timestamp="2026-04-10T10:00:00+00:00",
+        )
+        result = agent.build_analysis_from_llm_json(
+            item, "{}", scope_info=self._direct_scope(),
+        )
+        assert result.is_passdown is True
+
+    def test_project_tags_plural_key_honored(self):
+        """Sync path checks data['project_tags'] before data['project_tag'].
+        Batch path used to only check the singular form — this test pins
+        the helper's behaviour so the drift cannot return."""
+        item = RawItem(
+            source="outlook", item_id="x5", title="t", body="", url="",
+            author="", timestamp="2026-04-10T10:00:00+00:00",
+        )
+        payload = {"project_tags": ["alpha"]}
+        # No projects configured → all tags pass through validator
+        import config as _cfg
+        _saved = _cfg.PROJECTS
+        _cfg.PROJECTS = []
+        try:
+            result = agent.build_analysis_from_llm_json(
+                item, json.dumps(payload), scope_info=self._direct_scope(),
+            )
+        finally:
+            _cfg.PROJECTS = _saved
+        # serialize_project_tags returns a string (or None)
+        assert result.project_tag == "alpha"
+
+    def test_project_tag_serialized_not_list(self):
+        """Analysis.project_tag is Optional[str]; the helper must serialize."""
+        item = RawItem(
+            source="outlook", item_id="x6", title="t", body="", url="",
+            author="", timestamp="2026-04-10T10:00:00+00:00",
+        )
+        payload = {"project_tag": "beta"}
+        import config as _cfg
+        _saved = _cfg.PROJECTS
+        _cfg.PROJECTS = []
+        try:
+            result = agent.build_analysis_from_llm_json(
+                item, json.dumps(payload), scope_info=self._direct_scope(),
+            )
+        finally:
+            _cfg.PROJECTS = _saved
+        assert isinstance(result.project_tag, (str, type(None)))
+        assert result.project_tag == "beta"
+
+    def test_broadcast_scope_strips_owner_me(self):
+        """The recipient-scope safety net runs inside the helper, not just
+        in analyze().  Both paths get the same protection."""
+        item = RawItem(
+            source="outlook", item_id="x7", title="Team announce",
+            body="Everyone please review the doc by Friday.",
+            url="", author="boss@co.com",
+            timestamp="2026-04-10T10:00:00+00:00",
+            metadata={"to": "team@co.com", "cc": ""},
+        )
+        payload = {
+            "category": "task", "priority": "medium",
+            "action_items": [{"description": "Review the doc", "owner": "me"}],
+        }
+        # Configure user so postprocess_action_items can check name match
+        import config as _cfg
+        _name, _email = _cfg.USER_NAME, _cfg.USER_EMAIL
+        _cfg.USER_NAME, _cfg.USER_EMAIL = "Alice", "alice@co.com"
+        try:
+            result = agent.build_analysis_from_llm_json(
+                item, json.dumps(payload), scope_info=self._broadcast_scope(),
+            )
+        finally:
+            _cfg.USER_NAME, _cfg.USER_EMAIL = _name, _email
+        assert result.action_items == []
+
+    def test_metadata_fields_propagate_to_analysis(self):
+        item = RawItem(
+            source="outlook", item_id="x8", title="t", body="", url="",
+            author="", timestamp="2026-04-10T10:00:00+00:00",
+            metadata={
+                "to": "user@co.com", "cc": "cc@co.com",
+                "is_replied": True, "replied_at": "2026-04-10T11:00:00+00:00",
+                "direction": "sent",
+                "conversation_id": "C123", "conversation_topic": "Release",
+            },
+        )
+        result = agent.build_analysis_from_llm_json(
+            item, "{}", scope_info=self._direct_scope(),
+        )
+        assert result.to_field == "user@co.com"
+        assert result.cc_field == "cc@co.com"
+        assert result.is_replied is True
+        assert result.replied_at == "2026-04-10T11:00:00+00:00"
+        assert result.direction == "sent"
+        assert result.conversation_id == "C123"
+        assert result.conversation_topic == "Release"

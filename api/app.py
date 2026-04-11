@@ -2302,7 +2302,24 @@ def submit_deep_analysis(situation_id: str):
     try:
         r = http_requests.post(
             f"{config.MERLLM_URL}/api/batch/submit",
-            json={"source_app": "parsival", "prompt": prompt},
+            json={
+                "source_app": "parsival",
+                "prompt":     prompt,
+                "model":      config.effective_model(),
+                # Deep-analysis wants prose, not bounded JSON, so num_predict
+                # is higher than the reanalyze path. think:false + num_ctx
+                # match the orchestrator convention (see feedback_reasoning
+                # _model_caps.md) and keep both Ollama instances converged
+                # on the same KV-cache size — without num_ctx one GPU can
+                # end up with a much larger cache loaded and run ~2× slower
+                # than the other on identical workloads.
+                "options": {
+                    "think":       False,
+                    "num_predict": 2048,
+                    "num_ctx":     8192,
+                    "temperature": 0.2,
+                },
+            },
             timeout=10,
         )
         r.raise_for_status()

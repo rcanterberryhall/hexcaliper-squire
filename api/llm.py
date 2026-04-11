@@ -108,11 +108,14 @@ def generate(
     :param num_predict: Max tokens to generate.
     :param num_ctx: Context window size (Ollama only).
     :param timeout: Request timeout in seconds.
-    :param priority: merLLM priority bucket (``chat``, ``reserved``,
+    :param priority: merLLM priority bucket (``chat``, ``embeddings``,
         ``short``, ``feedback``, ``background``). Forwarded as the
         ``X-Priority`` header on Ollama calls. Defaults to ``short`` so
         any new call site that forgets to choose lands in a safe middle
         bucket instead of starving chat or jumping ahead of bulk work.
+        Note: ``embeddings`` is auto-routed by merLLM at the
+        ``/api/embeddings`` endpoint, so generate/chat callers should
+        not pick it (merLLM#38).
     :return: Raw response text from the LLM.
     :raises requests.HTTPError: On non-2xx response.
     """

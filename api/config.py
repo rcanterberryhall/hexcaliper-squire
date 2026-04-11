@@ -258,10 +258,12 @@ def ollama_headers(priority: str | None = None) -> dict:
     Ollama endpoint.
 
     :param priority: Optional merLLM priority bucket name (one of ``chat``,
-        ``reserved``, ``short``, ``feedback``, ``background``). When set,
+        ``embeddings``, ``short``, ``feedback``, ``background``). When set,
         an ``X-Priority`` header is added so merLLM places the request in
         the right bucket. When ``None``, no header is sent and merLLM
-        applies its own back-compat default.
+        applies its own back-compat default. Note that ``embeddings``
+        is auto-routed by merLLM at the ``/api/embeddings`` endpoint —
+        callers should not need to set it explicitly (merLLM#38).
     :return: Dict of HTTP headers to include with every Ollama request.
     :rtype: dict
     """

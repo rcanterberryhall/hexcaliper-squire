@@ -476,7 +476,7 @@ Situations are cross-source groupings of related analyses identified automatical
 | `POST`   | `/situations/{id}/rescore`            | Manually trigger score recomputation and LLM re-synthesis for a situation          |
 | `PATCH`  | `/situations/{id}`                    | Update `title`, `status`, `follow_up_date`, `notes`, or `project_tag`. Status changes are logged in `situation_events`. |
 | `GET`    | `/situations/{id}/events`             | Return the status transition history for a situation                               |
-| `POST`   | `/situations/{id}/deep-analysis`      | Submit the situation for extended-context deep analysis via merLLM night-mode batch. Returns `{"ok": true, "job_id": "..."}`. Prompt includes situation title, summary, all item summaries, and open actions. |
+| `POST`   | `/situations/{id}/deep-analysis`      | Submit the situation for extended-context deep analysis via the merLLM background batch queue. Returns `{"ok": true, "job_id": "..."}`. Prompt includes situation title, summary, all item summaries, and open actions. |
 | `POST`   | `/situations/{id}/deep-analysis/save` | Fetch completed batch result and store it as an intel item linked to the situation. Body: `{"job_id": "..."}`. Returns 409 if the job is not yet complete. |
 
 ### Batch status proxy
@@ -665,12 +665,12 @@ The progress bar in the UI is driven by `completed_items / total_items * 100` wh
 
 Within each tier, items are processed newest-first by timestamp, ensuring your most time-sensitive context is refreshed earliest in every re-analysis run.
 
-### Night-mode batch processing (merLLM integration)
+### Background batch processing (merLLM integration)
 
-When `POST /reanalyze` is triggered, Parsival checks `GET {MERLLM_URL}/api/merllm/status`. If the response is `{"mode": "night", ...}`, re-analysis jobs are submitted to `POST {MERLLM_URL}/api/batch/submit` instead of calling Ollama directly. This avoids contending with interactive GPU use during off-hours.
+When `POST /reanalyze` is triggered, Parsival submits each re-analysis job to `POST {MERLLM_URL}/api/batch/submit` instead of calling Ollama directly. merLLM enqueues the work in its `background` priority bucket, where strict top-down draining guarantees `chat`/`short`/`feedback` traffic always preempts bulk reanalysis at the dispatcher.
 
 Each submitted job stores a `batch_job_id` on the item record. A background polling thread (60-second interval) checks `GET {MERLLM_URL}/api/batch/result/{job_id}` for each pending job, parses the completed response, and applies the result exactly as a direct analysis would — updating the analysis record, todos, intel, knowledge graph, and situation formation.
 
-If merLLM is unreachable or returns a non-night mode, re-analysis proceeds with direct Ollama calls as normal. If a batch submission fails for an individual item, that item falls back to direct Ollama automatically.
+If merLLM is unreachable, re-analysis proceeds with direct Ollama calls as normal. If a batch submission fails for an individual item, that item falls back to direct Ollama automatically.
 
 Set the `MERLLM_URL` environment variable (default: `http://host.docker.internal:11400`) to point at your merLLM instance.

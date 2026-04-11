@@ -2264,7 +2264,9 @@ def submit_deep_analysis(situation_id: str):
     Submit a situation for extended-context deep analysis via merLLM's batch API.
 
     Builds a prompt from the situation's title, summary, and contributing items,
-    then queues it for processing during night mode (qwen3:32b, 32K+ context).
+    then queues it on merLLM's background priority bucket so it drains behind
+    any chat/short/feedback traffic but still uses the full reasoning model
+    (qwen3:32b, 32K+ context).
 
     :param situation_id: UUID of the situation to analyse.
     :return: ``{"ok": True, "job_id": "..."}``

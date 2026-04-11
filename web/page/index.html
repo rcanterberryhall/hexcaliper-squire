@@ -1301,8 +1301,8 @@ tr.attn-low  { opacity:0.65; }
     </div>
 
     <div class="help-section">
-      <h3>Night-mode batch processing</h3>
-      <p>When <strong>↺ Re-analyze</strong> is triggered and merLLM is reachable, re-analysis jobs are submitted to merLLM's batch queue at low priority. Interactive requests always take precedence. Results are applied automatically in the background — no action needed. The status message will read <em>Re-analysis queued — N items sent to batch</em> when this path is active.</p>
+      <h3>Background batch processing</h3>
+      <p>When <strong>↺ Re-analyze</strong> is triggered and merLLM is reachable, re-analysis jobs are submitted to merLLM's batch queue in the <strong>background</strong> priority bucket — the lowest of merLLM's five strict-priority lanes. Real-time chat (<strong>chat</strong>), bounded foreground work (<strong>short</strong>), and feedback work spawned by other background jobs (<strong>feedback</strong>) all dispatch first; background only drains when every higher lane is empty. Results are applied automatically in the background — no action needed. The status message will read <em>Re-analysis queued — N items sent to batch</em> when this path is active.</p>
     </div>
 
     <div class="help-section">

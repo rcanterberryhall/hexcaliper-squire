@@ -149,6 +149,12 @@ def _submit_batch_job(prompt: str) -> str | None:
     job that ran eventually, and one direct ``analyze(..., priority=
     "background")`` right away. This doubled the reanalyze LLM load and
     masked the batch path entirely.
+
+    ``options`` mirrors what ``llm._ollama_local`` sends on the direct path:
+    ``think:false`` disables qwen3 reasoning, ``num_predict`` caps decode
+    so the call cannot run unbounded on a P40. Without these the batch
+    runner sent ``options={}`` and qwen3:32b emitted unbounded reasoning
+    until merLLM's slot wedged — see Issue ``hexcaliper-merllm#?``.
     """
     try:
         r = http_requests.post(
@@ -157,6 +163,12 @@ def _submit_batch_job(prompt: str) -> str | None:
                 "source_app": "parsival",
                 "prompt":     prompt,
                 "model":      config.effective_model(),
+                "options":    {
+                    "think":       False,
+                    "num_predict": 768,
+                    "num_ctx":     8192,
+                    "temperature": 0.1,
+                },
             },
             timeout=10,
         )

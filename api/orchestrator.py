@@ -438,6 +438,12 @@ def run_scan(sources: list[str]) -> None:
         _scan_state["message"] = f"Error: {e}"
     finally:
         _scan_state["running"]                    = False
+        # Clear the cancellation flag so a subsequent ingest/scan/reanalyze
+        # is not poisoned by a cancel that belonged to this run.
+        # process_ingest_items shares _scan_state and aborts if it sees
+        # cancelled=True, so leaking the flag silently breaks the next
+        # fresh-item analyze path.
+        _scan_state["cancelled"]                  = False
         _scan_state["progress"]                   = _scan_state["total"]
         _scan_state["completed_items"]            = _scan_state["total_items"]
         _scan_state["estimated_minutes_remaining"] = 0
@@ -583,6 +589,10 @@ def run_reanalyze() -> None:
         log.error("reanalyze: %s", e)
     finally:
         _scan_state["running"]                    = False
+        # Clear the cancellation flag so a subsequent ingest/scan/reanalyze
+        # is not poisoned by a cancel that belonged to this run. See the
+        # matching comment in run_scan() for the full rationale.
+        _scan_state["cancelled"]                  = False
         _scan_state["progress"]                   = _scan_state["total"]
         _scan_state["completed_items"]            = _scan_state["total_items"]
         _scan_state["estimated_minutes_remaining"] = 0

@@ -75,6 +75,10 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .src-btn.on-github  { border-color: var(--text);   color: var(--text);   background: rgba(240,228,224,.06); }
 .src-btn.on-jira    { border-color: var(--amber);  color: var(--amber);  background: rgba(255,176,32,.08); }
 .src-btn.on-teams   { border-color: #6264a7;       color: #6264a7;       background: rgba(98,100,167,.08); }
+.src-toggles-label {
+  font-size: 8px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+  opacity: .6; white-space: nowrap; align-self: center;
+}
 .scan-btn {
   font-family: var(--display); font-size: 11px; font-weight: 700; letter-spacing: .12em;
   text-transform: uppercase; padding: 6px 16px; border: 1px solid var(--accent);
@@ -303,6 +307,23 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .t-time   { font-size: 10px; color: var(--muted); white-space: nowrap; }
 .t-link a { color: var(--blue); text-decoration: none; font-size: 11px; }
 .t-link a:hover { text-decoration: underline; }
+.t-urgency { font-size: 10px; color: var(--muted); opacity: .7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; display: block; margin-top: 1px; }
+
+/* ── Sortable column headers ── */
+.item-table th.sortable { cursor: pointer; user-select: none; transition: color .15s; }
+.item-table th.sortable:hover { color: var(--text); }
+.item-table th.sortable .sort-arrow { font-size: 8px; margin-left: 3px; opacity: 0; transition: opacity .15s; }
+.item-table th.sortable:hover .sort-arrow { opacity: .4; }
+.item-table th.sortable.sort-asc .sort-arrow,
+.item-table th.sortable.sort-desc .sort-arrow { opacity: 1; color: var(--accent); }
+
+/* ── Contacts sortable headers ── */
+.contacts-th-sortable { cursor: pointer; user-select: none; transition: color .15s; }
+.contacts-th-sortable:hover { color: var(--text); }
+.contacts-th-sortable .sort-arrow { font-size: 8px; margin-left: 3px; opacity: 0; transition: opacity .15s; }
+.contacts-th-sortable:hover .sort-arrow { opacity: .4; }
+.contacts-th-sortable.sort-asc .sort-arrow,
+.contacts-th-sortable.sort-desc .sort-arrow { opacity: 1; color: var(--accent); }
 
 /* ── Empty state ── */
 .empty      { text-align: center; padding: 60px 20px; color: var(--muted); }
@@ -811,6 +832,7 @@ tr.attn-low  { opacity:0.65; }
     <div class="topbar-right">
       <button class="menu-btn" onclick="toggleSidebar()" title="Menu">☰</button>
       <div class="src-toggles">
+        <span class="src-toggles-label">scan ▸</span>
         <button class="src-btn on-outlook" data-src="outlook" onclick="toggleSrc(this)">Outlook</button>
         <button class="src-btn on-slack"   data-src="slack"   onclick="toggleSrc(this)">Slack</button>
         <button class="src-btn on-github"  data-src="github"  onclick="toggleSrc(this)">GitHub</button>
@@ -859,7 +881,7 @@ tr.attn-low  { opacity:0.65; }
       </div>
 
       <div class="sb-block">
-        <div class="sb-label">Source</div>
+        <div class="sb-label">Source · Display</div>
         <div class="srow active-all" onclick="setSrc('all',this)">    <div class="sdot sdot-all"></div>    <span style="font-size:12px">All</span>     <span class="sc" id="sc-all">0</span></div>
         <div class="srow"            onclick="setSrc('outlook',this)"><div class="sdot sdot-outlook"></div><span style="font-size:12px">Outlook</span><span class="sc" id="sc-outlook">0</span></div>
         <div class="srow"            onclick="setSrc('slack',this)">  <div class="sdot sdot-slack"></div>  <span style="font-size:12px">Slack</span>  <span class="sc" id="sc-slack">0</span></div>
@@ -913,6 +935,10 @@ tr.attn-low  { opacity:0.65; }
             <option value="newest">Newest first</option>
             <option value="oldest">Oldest first</option>
             <option value="score" id="sortOptScore" style="display:none">Score ↓</option>
+            <option value="deadline" id="sortOptDeadline" style="display:none">Deadline ↓</option>
+            <option value="owner" id="sortOptOwner" style="display:none">Owner ↓</option>
+            <option value="status" id="sortOptStatus" style="display:none">Status ↓</option>
+            <option value="followup" id="sortOptFollowup" style="display:none">Follow-up ↓</option>
           </select>
         </div>
         <label class="show-done" id="showDoneLbl"><input type="checkbox" id="showDone" onchange="loadTodos()"> Show completed</label>
@@ -1347,6 +1373,53 @@ let searchQuery     = '';
 let dateFilter      = 'all';
 let _searchTimer    = null;
 
+let _colSort = { view: null, key: null, dir: 'asc' };
+
+function _toggleColSort(view, key, renderFn) {
+  if (_colSort.view === view && _colSort.key === key) {
+    _colSort.dir = _colSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    _colSort = { view, key, dir: 'asc' };
+  }
+  renderFn();
+}
+
+function _colSortArr(arr, key, accessor) {
+  if (_colSort.key !== key || !_colSort.view) return arr;
+  const dir = _colSort.dir === 'asc' ? 1 : -1;
+  return arr.slice().sort((a, b) => {
+    let va = accessor(a), vb = accessor(b);
+    if (typeof va === 'string') va = va.toLowerCase();
+    if (typeof vb === 'string') vb = vb.toLowerCase();
+    if (va == null) va = '';
+    if (vb == null) vb = '';
+    if (va < vb) return -1 * dir;
+    if (va > vb) return  1 * dir;
+    return 0;
+  });
+}
+
+function _sortArrow(view, key) {
+  const active = _colSort.view === view && _colSort.key === key;
+  const arrow = active ? (_colSort.dir === 'asc' ? '▲' : '▼') : '▲';
+  const cls = active ? `sort-${_colSort.dir}` : '';
+  return { arrow, cls };
+}
+
+function _sortTh(view, key, label, renderFn) {
+  const { arrow, cls } = _sortArrow(view, key);
+  return `<th class="sortable ${cls}" onclick="_toggleColSort('${view}','${key}',${renderFn})">${label}<span class="sort-arrow">${arrow}</span></th>`;
+}
+
+function _applyColSort(view, arr, columns) {
+  if (_colSort.view !== view || !_colSort.key) return arr;
+  const col = columns[_colSort.key];
+  if (!col) return arr;
+  return _colSortArr(arr, _colSort.key, col);
+}
+
+let _contactSort = { key: null, dir: 'asc' };
+
 async function loadProjectList() {
   try { allProjects = await api('/projects'); } catch(e) { allProjects = []; }
   try { knownSenders = (await api('/senders')).senders || []; } catch(e) { knownSenders = []; }
@@ -1706,6 +1779,15 @@ function _sortTodos(todos) {
   const a = todos.slice();
   if (sortBy === 'newest') return a.sort((x,y) => (y.created_at||'').localeCompare(x.created_at||''));
   if (sortBy === 'oldest') return a.sort((x,y) => (x.created_at||'').localeCompare(y.created_at||''));
+  if (sortBy === 'deadline') return a.sort((x,y) => {
+    const dx = x.deadline || '9999', dy = y.deadline || '9999';
+    return dx.localeCompare(dy) || _priRank(x.priority) - _priRank(y.priority);
+  });
+  if (sortBy === 'owner') return a.sort((x,y) => (x.owner||'').localeCompare(y.owner||'') || _priRank(x.priority) - _priRank(y.priority));
+  if (sortBy === 'status') {
+    const sRank = s => ({assigned:0,open:1,done:2}[s] ?? 1);
+    return a.sort((x,y) => sRank(x.status||(x.done?'done':'open')) - sRank(y.status||(y.done?'done':'open')) || _priRank(x.priority) - _priRank(y.priority));
+  }
   // priority: high→medium→low, then newest within group
   return a.sort((x,y) => _priRank(x.priority) - _priRank(y.priority) || (y.created_at||'').localeCompare(x.created_at||''));
 }
@@ -1728,8 +1810,7 @@ function renderTodos(todos) {
   for (const a of allAnalyses) analysisById.set(a.item_id, a);
   const sorted = _sortTodos(todos);
   el.innerHTML = '';
-  if (sortBy === 'newest' || sortBy === 'oldest') {
-    // Flat list sorted by date
+  if (sortBy === 'newest' || sortBy === 'oldest' || sortBy === 'deadline' || sortBy === 'owner' || sortBy === 'status') {
     sorted.forEach(t => el.appendChild(makeTodo(t, analysisById)));
   } else {
     // Grouped by priority
@@ -1898,9 +1979,7 @@ function showTodoEdit(docId, currentDesc, currentDl, currentPri) {
   row.innerHTML = `
     <input class="te-desc" type="text" value="${esc(currentDesc)}" style="flex:2;min-width:140px;padding:3px 7px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:11px" onkeydown="if(event.key==='Enter')saveTodoEdit(${docId})">
     <input class="te-dl"   type="date" value="${currentDl||''}" style="padding:3px 7px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:11px">
-    <select class="te-pri" style="padding:3px 7px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:11px">
-      ${['high','medium','low'].map(p=>`<option value="${p}"${p===currentPri?' selected':''}>${p}</option>`).join('')}
-    </select>
+    <input type="hidden" class="te-pri" value="${currentPri||'medium'}">
     <button class="detail-save" style="padding:3px 10px" onclick="saveTodoEdit(${docId})">Save</button>
     <button class="ia" style="padding:2px 7px;font-size:11px" onclick="this.closest('.todo-edit-row').remove()">✕</button>`;
   // Insert after the todo element with this id
@@ -2028,6 +2107,19 @@ function renderItems(items) {
     }</div></div>`;
     return;
   }
+  const itemCols = {
+    source:   i => i.source || '',
+    category: i => i.task_type ? `task-${i.task_type}` : (i.category || 'fyi'),
+    title:    i => (i.title || '').toLowerCase(),
+    author:   i => (i.author || '').toLowerCase(),
+    priority: i => _priRank(i.priority),
+    hierarchy: i => i.hierarchy || 'general',
+    timestamp: i => i.timestamp || ''
+  };
+  if (_colSort.view === 'items' && _colSort.key && itemCols[_colSort.key]) {
+    filtered = _applyColSort('items', filtered, itemCols);
+  }
+  const sTh = (key, label) => _sortTh('items', key, label, '_reRenderItems');
   el.innerHTML = `
     <table class="item-table">
       <colgroup>
@@ -2042,13 +2134,15 @@ function renderItems(items) {
         <col style="width:${colWidths[8]||60}px">
       </colgroup>
       <thead><tr>
-        <th>Source</th><th>Category</th><th>Title</th>
-        <th>From</th><th>Summary</th><th>Pri</th><th>Time</th><th>Link</th><th></th>
+        ${sTh('source','Source')}${sTh('category','Category')}${sTh('title','Title')}
+        <th>From</th><th>Summary</th>${sTh('priority','Pri')}${sTh('timestamp','Time')}<th>Link</th><th></th>
       </tr></thead>
       <tbody>${filtered.map(itemRow).join('')}</tbody>
     </table>`;
   initResizableCols();
 }
+
+function _reRenderItems() { renderItems(allAnalyses); }
 
 function itemRow(i) {
   const t       = i.timestamp ? new Date(i.timestamp).toLocaleDateString([], {month:'short', day:'numeric'}) : '';
@@ -2077,7 +2171,7 @@ function itemRow(i) {
     <td class="t-title">${esc(i.title || '')}${proj}</td>
     <td class="t-author">${esc(i.author || '')}</td>
     <td class="t-sum">${esc(i.summary || '')}</td>
-    <td class="pri-${i.priority || 'low'}">${i.priority || 'low'}</td>
+    <td class="pri-${i.priority || 'low'}">${i.priority || 'low'}${i.urgency_reason ? `<span class="t-urgency" title="${esc(i.urgency_reason)}">${esc(i.urgency_reason)}</span>` : ''}</td>
     <td class="t-time">${t}</td>
     <td class="t-link" onclick="event.stopPropagation()">${link}</td>
     ${tagCell}
@@ -2257,6 +2351,7 @@ function renderSituations(situations) {
   if (sortBy === 'newest')   visible.sort((a,b) => (b.last_updated||'').localeCompare(a.last_updated||''));
   else if (sortBy === 'oldest') visible.sort((a,b) => (a.last_updated||'').localeCompare(b.last_updated||''));
   else if (sortBy === 'priority') visible.sort((a,b) => _priRank(a.priority) - _priRank(b.priority) || b.score - a.score);
+  else if (sortBy === 'followup') visible.sort((a,b) => (a.follow_up_date||'9999').localeCompare(b.follow_up_date||'9999') || b.score - a.score);
   else /* score */           visible.sort((a,b) => b.score - a.score);
   if (!visible.length) {
     el.innerHTML = `<div class="empty"><div class="empty-icon">◈</div>
@@ -2570,6 +2665,10 @@ function _updateToolbarForView(v) {
   const showDoneLbl      = $('showDoneLbl');
   const showResolvedLbl  = $('showResolvedLbl');
   const scoreOpt         = $('sortOptScore');
+  const deadlineOpt      = $('sortOptDeadline');
+  const ownerOpt         = $('sortOptOwner');
+  const statusOpt        = $('sortOptStatus');
+  const followupOpt      = $('sortOptFollowup');
   const addActionBtn     = $('addActionBtn');
   const regenBriefingBtn = $('regenerateBriefingBtn');
   const toolbarFilters   = document.querySelector('.toolbar-filters');
@@ -2581,10 +2680,20 @@ function _updateToolbarForView(v) {
   if (showDoneLbl)      showDoneLbl.style.display      = v === 'todos' ? '' : 'none';
   if (showResolvedLbl)  showResolvedLbl.style.display  = v === 'situations' ? '' : 'none';
   if (scoreOpt)         scoreOpt.style.display         = v === 'situations' ? '' : 'none';
+  if (deadlineOpt)      deadlineOpt.style.display      = v === 'todos' ? '' : 'none';
+  if (ownerOpt)         ownerOpt.style.display         = v === 'todos' ? '' : 'none';
+  if (statusOpt)        statusOpt.style.display        = v === 'todos' ? '' : 'none';
+  if (followupOpt)      followupOpt.style.display      = v === 'situations' ? '' : 'none';
   if (addActionBtn)     addActionBtn.style.display     = (v === 'intel' || isContacts) ? 'none' : '';
   if (regenBriefingBtn) regenBriefingBtn.style.display = v === 'intel' ? '' : 'none';
-  // If "score" is selected but we left situations, fall back to priority
-  if (v !== 'situations' && sortBy === 'score') {
+  // If a view-specific sort is selected but we left that view, fall back to priority
+  const todoOnlySorts = ['deadline','owner','status'];
+  const sitOnlySorts  = ['score','followup'];
+  if (v !== 'situations' && sitOnlySorts.includes(sortBy)) {
+    sortBy = 'priority';
+    const sel = $('sortSel'); if (sel) sel.value = 'priority';
+  }
+  if (v !== 'todos' && todoOnlySorts.includes(sortBy)) {
     sortBy = 'priority';
     const sel = $('sortSel'); if (sel) sel.value = 'priority';
   }
@@ -2666,9 +2775,49 @@ async function loadContacts(query) {
   }
 }
 
+function _toggleContactSort(key) {
+  if (_contactSort.key === key) {
+    _contactSort.dir = _contactSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    _contactSort = { key, dir: 'asc' };
+  }
+  _rerenderContacts();
+}
+
+function _rerenderContacts() {
+  const q = $('contactsSearch')?.value || '';
+  renderContactsView(_contactsCache, _contactsCache.length, q);
+}
+
+function _contactSortTh(key, label) {
+  const active = _contactSort.key === key;
+  const arrow = active ? (_contactSort.dir === 'asc' ? '▲' : '▼') : '▲';
+  const cls = active ? `contacts-th-sortable sort-${_contactSort.dir}` : 'contacts-th-sortable';
+  return `<th class="${cls}" style="padding:6px 12px;cursor:pointer" onclick="_toggleContactSort('${key}')">${label}<span class="sort-arrow">${arrow}</span></th>`;
+}
+
 function renderContactsView(contacts, total, query) {
   const view = $('contacts-view');
-  const rows = contacts.map(c => {
+  let sorted = contacts.slice();
+  if (_contactSort.key) {
+    const accessors = {
+      name:       c => (c.name || '').toLowerCase(),
+      employer:   c => (c.employer || '').toLowerCase(),
+      last_seen:  c => c.last_seen || '',
+      source_count: c => c.source_count || 0
+    };
+    const acc = accessors[_contactSort.key];
+    if (acc) {
+      const dir = _contactSort.dir === 'asc' ? 1 : -1;
+      sorted.sort((a, b) => {
+        let va = acc(a), vb = acc(b);
+        if (va < vb) return -1 * dir;
+        if (va > vb) return  1 * dir;
+        return 0;
+      });
+    }
+  }
+  const rows = sorted.map(c => {
     const emailList = (c.emails || []).join(', ') || '<span style="color:var(--muted)">—</span>';
     const meta = [c.title, c.employer].filter(Boolean).join(' · ') || '<span style="color:var(--muted)">no title/employer</span>';
     return `<tr style="border-bottom:1px solid var(--border2);cursor:pointer" onclick="editContact(${c.contact_id})">
@@ -2695,11 +2844,11 @@ function renderContactsView(contacts, total, query) {
     <table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead>
         <tr style="border-bottom:1px solid var(--border2);background:var(--surface);text-align:left;font-size:11px;color:var(--muted)">
-          <th style="padding:6px 12px">Name / Title</th>
+          ${_contactSortTh('name', 'Name / Title')}
           <th style="padding:6px 12px">Emails</th>
           <th style="padding:6px 12px">Phone</th>
-          <th style="padding:6px 12px"># Seen</th>
-          <th style="padding:6px 12px">Last seen</th>
+          ${_contactSortTh('source_count', '# Seen')}
+          ${_contactSortTh('last_seen', 'Last seen')}
         </tr>
       </thead>
       <tbody>${rows || '<tr><td colspan="5" style="padding:24px;text-align:center;color:var(--muted)">No contacts yet — click "Rebuild from items" to scrape your existing emails.</td></tr>'}</tbody>
@@ -3090,10 +3239,7 @@ function openDetail(item) {
   const openLink = item.url
     ? `<a href="${esc(item.url)}" target="_blank" class="connect-btn" style="text-decoration:none">↗ Open in ${item.source}</a>`
     : '<span style="font-size:11px;color:var(--muted)">No source link</span>';
-  const noiseBtn = item.category === 'noise'
-    ? `<button class="restore-btn" onclick="restoreItem('${esc(item.item_id)}')">↩ Restore</button>`
-    : `<button class="restore-btn" style="border-color:var(--red);color:var(--red)" onclick="markNoise('${esc(item.item_id)}')">✕ Mark irrelevant</button>`;
-  $('detailFoot').innerHTML = `${openLink}<span style="flex:1"></span>${noiseBtn}`;
+  $('detailFoot').innerHTML = openLink;
 
   $('detailPanel').classList.add('open');
 }

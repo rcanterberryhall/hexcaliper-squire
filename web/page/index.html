@@ -18,6 +18,7 @@
   --amber:   #ffb020;
   --red:     #ff4040;
   --blue:    #40b8ff;
+  --green:   #50c878;
   --purple:  #cc3300;
   --mono:    'JetBrains Mono', monospace;
   --display: 'Syne', sans-serif;
@@ -927,6 +928,118 @@ tr.attn-low  { opacity:0.65; }
 .col-resize-handle:hover, .col-resize-handle.dragging { background: var(--accent); opacity: .45; }
 .item-table tr { cursor: pointer; }
 .item-table tr:hover td { background: rgba(212,160,23,.04); }
+
+/* ── Look-ahead board (#48) ─────────────────────────────────────────────── */
+.la-toolbar {
+  display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+  padding:8px 14px; border-bottom:1px solid var(--border2);
+  background:var(--surface); font-size:11px;
+}
+.la-toolbar select, .la-toolbar input[type="text"] {
+  padding:3px 7px; background:var(--bg); border:1px solid var(--border2);
+  border-radius:var(--r); color:var(--text); font-size:11px;
+}
+.la-mode {
+  padding:3px 9px; border:1px solid var(--border2); background:var(--bg);
+  color:var(--muted); border-radius:var(--r); cursor:pointer; font-size:11px;
+}
+.la-mode.active { color:var(--text); background:var(--surface2, var(--surface)); border-color:var(--accent); }
+.la-empty { padding:40px 20px; text-align:center; color:var(--muted); font-size:12px; }
+.la-board-wrap { overflow-x:auto; padding:6px 0 12px; }
+.la-board {
+  display:grid;
+  /* 1 overdue gutter + 14 day columns, min-width so it scrolls on narrow screens */
+  grid-template-columns: 140px 60px repeat(14, minmax(90px, 1fr));
+  row-gap:4px; column-gap:2px;
+  min-width:1200px;
+  position:relative;
+}
+.la-board.overview { grid-template-columns: 160px repeat(14, minmax(60px, 1fr)); min-width:900px; }
+.la-head-lane { font-size:10px; color:var(--muted); padding:6px 8px; text-transform:uppercase; letter-spacing:.1em; }
+.la-head-day {
+  font-size:10px; text-align:center; padding:4px 0;
+  color:var(--muted); border-bottom:1px solid var(--border2);
+}
+.la-head-day.today { color:var(--accent); font-weight:600; }
+.la-head-day .la-day-num { font-size:14px; color:var(--text); font-weight:500; }
+.la-head-day.overdue { color:var(--red); font-style:italic; }
+.la-lane-label {
+  padding:4px 8px; font-size:11px; color:var(--text);
+  border-right:1px solid var(--border2); display:flex; align-items:center;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.la-day-cell {
+  border-right:1px solid var(--border); min-height:44px;
+  background:rgba(0,0,0,.02);
+}
+.la-day-cell.today { background:rgba(212,160,23,.07); }
+.la-day-cell.overdue-gutter { background:rgba(230,80,80,.05); border-right:2px solid var(--red); }
+.la-card {
+  background:var(--surface); border:1px solid var(--border2);
+  border-radius:var(--r); padding:4px 7px; font-size:11px;
+  display:flex; flex-direction:column; gap:2px; cursor:pointer;
+  min-height:36px; box-shadow:0 1px 2px rgba(0,0,0,.12);
+  z-index:1; position:relative;
+}
+.la-card:hover { border-color:var(--accent); z-index:2; }
+.la-card.planned   { border-left:3px solid var(--muted); }
+.la-card.in_progress { border-left:3px solid var(--blue); }
+.la-card.done      { border-left:3px solid var(--green); opacity:.55; }
+.la-card.blocked   { border-left:3px solid var(--red); }
+.la-card .la-card-title { font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.la-card .la-card-meta { font-size:10px; color:var(--muted); display:flex; gap:6px; flex-wrap:wrap; }
+.la-card .la-chip { padding:0 5px; border-radius:3px; background:var(--bg); font-size:9px; letter-spacing:.04em; }
+.la-card .la-chip.bom-missing { background:rgba(230,80,80,.15); color:var(--red); }
+.la-card .la-drag-handle, .la-card .la-resize-handle {
+  position:absolute; top:0; bottom:0; width:6px; cursor:ew-resize;
+}
+.la-card .la-resize-handle.left  { left:-3px; }
+.la-card .la-resize-handle.right { right:-3px; }
+.la-card.dragging { opacity:.5; }
+.la-card .la-card-shift { font-size:9px; color:var(--muted); font-style:italic; }
+
+.la-overview-bar {
+  background:var(--accent-dim, rgba(212,160,23,.25));
+  border-radius:3px; min-height:16px; font-size:10px; padding:1px 5px;
+  color:var(--text); cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.la-overview-bar.highlight { background:var(--accent); color:var(--bg); font-weight:600; }
+.la-overview-bar.conflict  { background:rgba(230,80,80,.35); color:var(--red); }
+
+/* Resource editor dialog */
+.la-modal { background:var(--surface); border:1px solid var(--border2);
+  border-radius:var(--r); padding:16px; max-width:560px; margin:40px auto;
+  box-shadow:0 12px 36px rgba(0,0,0,.45); }
+.la-field { display:flex; flex-direction:column; gap:3px; margin-bottom:10px; }
+.la-field label { font-size:10px; text-transform:uppercase; letter-spacing:.14em; color:var(--muted); }
+.la-field input, .la-field select, .la-field textarea {
+  padding:4px 8px; background:var(--bg); border:1px solid var(--border2);
+  border-radius:var(--r); color:var(--text); font-size:12px;
+}
+.la-field-row { display:flex; gap:10px; }
+.la-field-row .la-field { flex:1; }
+.la-bom-row { display:flex; gap:6px; align-items:center; padding:3px 0; font-size:11px; }
+.la-bom-row .la-bom-status {
+  padding:1px 6px; border-radius:3px; font-size:9px; cursor:pointer;
+  text-transform:uppercase; letter-spacing:.08em;
+}
+.la-bom-row .la-bom-status.needed   { background:rgba(230,80,80,.15); color:var(--red); }
+.la-bom-row .la-bom-status.secured  { background:rgba(80,180,100,.15); color:var(--green); }
+.la-bom-row .la-bom-status.consumed { background:var(--bg); color:var(--muted); text-decoration:line-through; }
+
+@media (max-width: 700px) {
+  /* Mobile: collapse the board into a vertical day list. */
+  .la-board-wrap { overflow-x:visible; }
+  .la-board {
+    display:block; min-width:0;
+  }
+  .la-board > .la-head-lane, .la-board > .la-lane-label { display:none; }
+  .la-day-section {
+    margin-bottom:12px; border-top:1px solid var(--border2); padding-top:6px;
+  }
+  .la-day-section h4 { margin:0 0 6px 6px; font-size:12px; color:var(--muted); }
+  .la-day-section .la-card { margin:3px 6px; }
+}
 </style>
 </head>
 <body>
@@ -1037,6 +1150,7 @@ tr.attn-low  { opacity:0.65; }
           <button class="vtab"        onclick="setView('situations',this)">Situations</button>
           <button class="vtab"        onclick="setView('assigned',this)">Assigned<span id="assigned-badge" class="vtab-badge">0</span></button>
           <button class="vtab"        onclick="setView('contacts',this)">Contacts</button>
+          <button class="vtab"        onclick="setView('lookahead',this)">Look-ahead</button>
         </div>
         <div class="toolbar-filters">
           <input type="search" class="search-input" id="searchInput" placeholder="Search…" oninput="onSearch(this.value)" autocomplete="off">
@@ -1085,7 +1199,46 @@ tr.attn-low  { opacity:0.65; }
       <div id="situations-view"><div class="loading-placeholder"><div class="spinner-lg"></div><div>Loading situations…</div></div></div>
       <div id="assigned-view" style="display:none"></div>
       <div id="contacts-view" style="display:none"></div>
+      <div id="lookahead-view" style="display:none">
+        <div class="la-toolbar">
+          <button class="la-mode active" id="laModeProject" onclick="setLookaheadMode('project')">Project</button>
+          <button class="la-mode"        id="laModeOverview" onclick="setLookaheadMode('overview')">Overview</button>
+          <select id="laProjectSel" onchange="onLookaheadProjectChange(this.value)">
+            <option value="">— select project —</option>
+          </select>
+          <input type="text" id="laAssigneeFilter" placeholder="Assignee filter…" oninput="renderLookahead()" style="max-width:160px">
+          <select id="laStatusFilter" onchange="renderLookahead()">
+            <option value="">all statuses</option>
+            <option value="planned">planned</option>
+            <option value="in_progress">in progress</option>
+            <option value="done">done</option>
+            <option value="blocked">blocked</option>
+          </select>
+          <select id="laResourceFilter" onchange="renderLookahead()">
+            <option value="">all resources</option>
+          </select>
+          <label style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:4px">
+            <input type="checkbox" id="laPresetMissing" onchange="renderLookahead()"> missing resources
+          </label>
+          <button class="ia" onclick="openLookaheadCardEditor()" style="padding:3px 9px;font-size:11px;margin-left:auto">+ New card</button>
+          <button class="ia" onclick="openResourcesModal()"   style="padding:3px 9px;font-size:11px">Resources</button>
+          <button class="ia" onclick="openShiftsModal()"       style="padding:3px 9px;font-size:11px">⚙ Shifts</button>
+        </div>
+        <div class="la-board-wrap" id="laBoardWrap">
+          <div class="la-empty">Loading look-ahead…</div>
+        </div>
+      </div>
     </div>
+  </div>
+
+  <!-- Look-ahead modals -->
+  <div class="modal-backdrop" id="laModalBackdrop" onclick="closeLaModal()" style="display:none"></div>
+  <div class="modal" id="laModal" style="display:none;max-width:640px">
+    <div class="modal-head">
+      <span class="modal-head-title" id="laModalTitle">Look-ahead</span>
+      <button class="modal-close" onclick="closeLaModal()">✕</button>
+    </div>
+    <div class="modal-body" id="laModalBody"></div>
   </div>
 
   <div class="statusbar">
@@ -3041,10 +3194,12 @@ function _updateToolbarForView(v) {
   const regenBriefingBtn = $('regenerateBriefingBtn');
   const toolbarFilters   = document.querySelector('.toolbar-filters');
   const showHiddenLbl    = document.querySelector('label.show-done input#showHidden')?.parentElement;
-  // Contacts has its own search bar inside the view; hide the global toolbar bits.
-  const isContacts = v === 'contacts';
-  if (toolbarFilters)   toolbarFilters.style.display   = isContacts ? 'none' : '';
-  if (showHiddenLbl)    showHiddenLbl.style.display    = isContacts ? 'none' : '';
+  // Contacts + look-ahead have their own toolbars; hide the global ones.
+  const isContacts  = v === 'contacts';
+  const isLookahead = v === 'lookahead';
+  const hideGlobal  = isContacts || isLookahead;
+  if (toolbarFilters)   toolbarFilters.style.display   = hideGlobal ? 'none' : '';
+  if (showHiddenLbl)    showHiddenLbl.style.display    = hideGlobal ? 'none' : '';
   if (showDoneLbl)      showDoneLbl.style.display      = v === 'todos' ? '' : 'none';
   if (showResolvedLbl)  showResolvedLbl.style.display  = v === 'situations' ? '' : 'none';
   if (scoreOpt)         scoreOpt.style.display         = v === 'situations' ? '' : 'none';
@@ -3052,7 +3207,7 @@ function _updateToolbarForView(v) {
   if (ownerOpt)         ownerOpt.style.display         = v === 'todos' ? '' : 'none';
   if (statusOpt)        statusOpt.style.display        = v === 'todos' ? '' : 'none';
   if (followupOpt)      followupOpt.style.display      = v === 'situations' ? '' : 'none';
-  if (addActionBtn)     addActionBtn.style.display     = (v === 'intel' || isContacts) ? 'none' : '';
+  if (addActionBtn)     addActionBtn.style.display     = (v === 'intel' || hideGlobal) ? 'none' : '';
   if (regenBriefingBtn) regenBriefingBtn.style.display = v === 'intel' ? '' : 'none';
   // If a view-specific sort is selected but we left that view, fall back to priority
   const todoOnlySorts = ['deadline','owner','status'];
@@ -3113,12 +3268,14 @@ function setView(v, el) {
   $('situations-view').style.display = v === 'situations' ? 'block' : 'none';
   $('assigned-view').style.display   = v === 'assigned'   ? 'block' : 'none';
   $('contacts-view').style.display   = v === 'contacts'   ? 'block' : 'none';
+  $('lookahead-view').style.display  = v === 'lookahead'  ? 'block' : 'none';
   _updateToolbarForView(v);
   if (v === 'intel')      loadIntel();
   if (v === 'items')      loadItems();
   if (v === 'situations') loadSituations();
   if (v === 'assigned')   loadAssigned();
   if (v === 'contacts')   loadContacts();
+  if (v === 'lookahead')  loadLookahead();
 }
 
 // ── Contacts view ─────────────────────────────────────────────────────────────
@@ -4817,6 +4974,737 @@ loadProjectList();
     openSettings();
   }
 })();
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Look-ahead board (parsival#48)
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Two-week planning surface. Mode is either 'project' (single-project 14-day
+// board with detailed cards) or 'overview' (one thin row per project to
+// surface overlap and cross-project resource contention).  Selection is
+// sticky in localStorage so switching tabs doesn't lose context.
+
+const _LA = {
+  mode: 'project',
+  project: null,
+  cards: [],
+  overview: [],
+  resources: [],
+  shifts: {},            // {shift_num: shift_row}
+  rangeStart: null,      // YYYY-MM-DD (today)
+  rangeEnd: null,        // YYYY-MM-DD (today + 13)
+  editingCard: null,     // card being edited in modal, or null for new
+  projects: [],
+};
+
+function _laToday() {
+  const d = new Date();
+  d.setHours(0,0,0,0);
+  return d;
+}
+
+function _laISO(d) {
+  // YYYY-MM-DD local, not UTC — the app stores dates as local calendar days.
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function _laAddDays(iso, n) {
+  const [y,m,d] = iso.split('-').map(Number);
+  const dt = new Date(y, m-1, d);
+  dt.setDate(dt.getDate() + n);
+  return _laISO(dt);
+}
+
+function _laDayDiff(a, b) {
+  const [y1,m1,d1] = a.split('-').map(Number);
+  const [y2,m2,d2] = b.split('-').map(Number);
+  const da = new Date(y1, m1-1, d1);
+  const db = new Date(y2, m2-1, d2);
+  return Math.round((db - da) / 86400000);
+}
+
+function _laFmtDayHead(iso) {
+  const [y,m,d] = iso.split('-').map(Number);
+  const dt = new Date(y, m-1, d);
+  const dow = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dt.getDay()];
+  return { dow, num: d };
+}
+
+async function loadLookahead() {
+  // Resolve window once per view open; reloads keep the same calendar range.
+  const today = _laToday();
+  _LA.rangeStart = _laISO(today);
+  _LA.rangeEnd   = _laISO(new Date(today.getTime() + 13 * 86400000));
+  await _laRefreshProjects();
+  // Restore sticky selection if valid; else fall through to first project.
+  const saved = localStorage.getItem('la.project');
+  if (saved && _LA.projects.includes(saved)) _LA.project = saved;
+  else if (_LA.projects.length && !_LA.project) _LA.project = _LA.projects[0];
+  const sel = $('laProjectSel');
+  if (sel) {
+    sel.innerHTML = '<option value="">— select project —</option>' +
+      _LA.projects.map(p => `<option value="${esc(p)}" ${p===_LA.project?'selected':''}>${esc(p)}</option>`).join('');
+  }
+  const savedMode = localStorage.getItem('la.mode');
+  if (savedMode === 'overview') setLookaheadMode('overview', true);
+  await Promise.all([_laLoadResources(), _laLoadData()]);
+  renderLookahead();
+}
+
+async function _laRefreshProjects() {
+  try {
+    const ps = await api('/projects');
+    _LA.projects = (ps || []).map(p => p.name).filter(Boolean);
+  } catch(e) { _LA.projects = []; }
+}
+
+async function _laLoadResources() {
+  try {
+    _LA.resources = await api('/lookahead/resources');
+  } catch(e) { _LA.resources = []; }
+  // Refresh the resource filter dropdown
+  const sel = $('laResourceFilter');
+  if (sel) {
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">all resources</option>' +
+      _LA.resources.map(r => `<option value="${r.id}">${esc(r.name)} (${esc(r.type)})</option>`).join('');
+    sel.value = prev;
+  }
+}
+
+async function _laLoadData() {
+  if (_LA.mode === 'overview') {
+    try {
+      _LA.overview = await api(`/lookahead/overview?start=${_LA.rangeStart}&end=${_LA.rangeEnd}`);
+    } catch(e) { _LA.overview = []; }
+  } else {
+    if (!_LA.project) { _LA.cards = []; return; }
+    try {
+      const q = `project=${encodeURIComponent(_LA.project)}&start=${_LA.rangeStart}&end=${_LA.rangeEnd}`;
+      _LA.cards = await api('/lookahead/cards?' + q);
+    } catch(e) { _LA.cards = []; }
+    try {
+      const shifts = await api(`/lookahead/shifts?project=${encodeURIComponent(_LA.project)}`);
+      _LA.shifts = {};
+      for (const s of shifts || []) _LA.shifts[s.shift_num] = s;
+    } catch(e) { _LA.shifts = {}; }
+  }
+}
+
+function setLookaheadMode(mode, skipRender) {
+  _LA.mode = mode;
+  localStorage.setItem('la.mode', mode);
+  $('laModeProject').classList.toggle('active', mode === 'project');
+  $('laModeOverview').classList.toggle('active', mode === 'overview');
+  const sel = $('laProjectSel');
+  if (sel) sel.style.display = mode === 'project' ? '' : 'none';
+  if (!skipRender) {
+    _laLoadData().then(renderLookahead);
+  }
+}
+
+function onLookaheadProjectChange(name) {
+  _LA.project = name || null;
+  localStorage.setItem('la.project', _LA.project || '');
+  _laLoadData().then(renderLookahead);
+}
+
+function renderLookahead() {
+  const wrap = $('laBoardWrap');
+  if (!wrap) return;
+  if (_LA.mode === 'overview') {
+    wrap.innerHTML = _laRenderOverviewBoard();
+    return;
+  }
+  if (!_LA.project) {
+    wrap.innerHTML = '<div class="la-empty">Pick a project from the selector to see its look-ahead.</div>';
+    return;
+  }
+  wrap.innerHTML = _laRenderProjectBoard();
+  _laWireDragHandlers();
+}
+
+function _laVisibleCards() {
+  const assignee = ($('laAssigneeFilter')?.value || '').trim().toLowerCase();
+  const status   = $('laStatusFilter')?.value || '';
+  const resource = $('laResourceFilter')?.value || '';
+  const missing  = $('laPresetMissing')?.checked;
+  return _LA.cards.filter(c => {
+    if (assignee && !(c.assignee||'').toLowerCase().includes(assignee)) return false;
+    if (status   && c.status !== status) return false;
+    if (resource && !(c.resources||[]).some(r => String(r.resource_id) === String(resource))) return false;
+    if (missing  && !(c.resources||[]).some(r => r.status === 'needed'))      return false;
+    return true;
+  });
+}
+
+function _laLaneKey(card) {
+  return card.assignee || '— unassigned —';
+}
+
+function _laBarStyle(card, gridRow) {
+  // Returns grid-column (+ optional grid-row) style for a card bar.
+  //   col 1         : lane label
+  //   col 2         : overdue gutter
+  //   cols 3..16    : 14-day window
+  const today = _LA.rangeStart;
+  let start = card.start_date;
+  let end   = card.end_date;
+  const overdue = end < today && card.status !== 'done';
+  const rowStyle = gridRow ? `; grid-row: ${gridRow}` : '';
+  if (overdue) return 'grid-column: 2 / 3' + rowStyle;
+  // Clamp to window
+  if (start < today) start = today;
+  if (end   > _LA.rangeEnd) end = _LA.rangeEnd;
+  const startCol = 3 + _laDayDiff(today, start);
+  const endCol   = 3 + _laDayDiff(today, end) + 1;
+  return `grid-column: ${startCol} / ${endCol}${rowStyle}`;
+}
+
+function _laShiftChip(card) {
+  const s = _LA.shifts[card.start_shift_num];
+  if (s && s.label) {
+    const range = (s.start_time && s.end_time) ? ` ${s.start_time}–${s.end_time}` : '';
+    return `<span class="la-chip">${esc(s.label)}${esc(range)}</span>`;
+  }
+  return `<span class="la-chip">shift ${card.start_shift_num}</span>`;
+}
+
+function _laBomChip(card) {
+  const missing = (card.resources || []).filter(r => r.status === 'needed').length;
+  if (!missing) return '';
+  return `<span class="la-chip bom-missing">⚠ ${missing} missing</span>`;
+}
+
+function _laRenderProjectBoard() {
+  const cards = _laVisibleCards();
+  // Group by lane (assignee); preserve first-seen order.
+  const lanes = [];
+  const byLane = new Map();
+  for (const c of cards) {
+    const k = _laLaneKey(c);
+    if (!byLane.has(k)) { byLane.set(k, []); lanes.push(k); }
+    byLane.get(k).push(c);
+  }
+
+  // If running on a narrow viewport, use the vertical day-list layout.
+  if (window.matchMedia('(max-width: 700px)').matches) {
+    return _laRenderMobileProject(cards);
+  }
+
+  const todayISO = _laISO(_laToday());
+  let head = '<div class="la-head-lane"></div>';
+  head += '<div class="la-head-day overdue">Overdue</div>';
+  for (let i = 0; i < 14; i++) {
+    const iso = _laAddDays(_LA.rangeStart, i);
+    const f = _laFmtDayHead(iso);
+    const cls = iso === todayISO ? 'la-head-day today' : 'la-head-day';
+    head += `<div class="${cls}">${esc(f.dow)}<div class="la-day-num">${f.num}</div></div>`;
+  }
+
+  let body = '';
+  lanes.forEach((lane, laneIdx) => {
+    // Row 1 is the header; each lane occupies the next row.
+    const row = 2 + laneIdx;
+    body += `<div class="la-lane-label" title="${esc(lane)}" style="grid-row:${row}">${esc(lane)}</div>`;
+    body += `<div class="la-day-cell overdue-gutter" style="grid-row:${row}"></div>`;
+    for (let i = 0; i < 14; i++) {
+      const iso = _laAddDays(_LA.rangeStart, i);
+      const cls = iso === todayISO ? 'la-day-cell today' : 'la-day-cell';
+      body += `<div class="${cls}" style="grid-row:${row}"></div>`;
+    }
+    for (const card of byLane.get(lane)) {
+      body += _laRenderCardBar(card, row);
+    }
+  });
+
+  if (!cards.length) {
+    return `<div class="la-empty">No cards in the 14-day window for <strong>${esc(_LA.project)}</strong>. Click <strong>+ New card</strong> above to add one.</div>`;
+  }
+
+  return `<div class="la-board">${head}${body}</div>`;
+}
+
+function _laRenderCardBar(card, gridRow) {
+  const statusCls = card.status || 'planned';
+  return `<div class="la-card ${esc(statusCls)}" style="${_laBarStyle(card, gridRow)}" data-card-id="${esc(card.id)}" draggable="true"
+              onclick="editLookaheadCard('${esc(card.id)}')">
+    <div class="la-card-title">${esc(card.title)}</div>
+    <div class="la-card-meta">
+      ${card.assignee ? `<span>${esc(card.assignee)}</span>` : ''}
+      ${_laShiftChip(card)}
+      ${_laBomChip(card)}
+      ${card.status === 'blocked' ? '<span class="la-chip" style="color:var(--red)">blocked</span>' : ''}
+    </div>
+  </div>`;
+}
+
+function _laRenderMobileProject(cards) {
+  // Bucket cards into day sections for the vertical mobile list.
+  const byDay = new Map();
+  for (const c of cards) {
+    // Card shows up once per day it spans, clamped to window.
+    let start = c.start_date < _LA.rangeStart ? _LA.rangeStart : c.start_date;
+    let end   = c.end_date   > _LA.rangeEnd   ? _LA.rangeEnd   : c.end_date;
+    for (let d = _laDayDiff(_LA.rangeStart, start); d <= _laDayDiff(_LA.rangeStart, end); d++) {
+      const iso = _laAddDays(_LA.rangeStart, d);
+      if (!byDay.has(iso)) byDay.set(iso, []);
+      byDay.get(iso).push(c);
+    }
+  }
+  let html = '';
+  for (let i = 0; i < 14; i++) {
+    const iso = _laAddDays(_LA.rangeStart, i);
+    const list = byDay.get(iso) || [];
+    if (!list.length) continue;
+    const f = _laFmtDayHead(iso);
+    html += `<div class="la-day-section"><h4>${esc(f.dow)} ${f.num}</h4>`;
+    for (const c of list) html += _laRenderCardBar(c);
+    html += `</div>`;
+  }
+  if (!html) html = '<div class="la-empty">No cards in the 14-day window.</div>';
+  return `<div class="la-board mobile">${html}</div>`;
+}
+
+function _laRenderOverviewBoard() {
+  const todayISO = _laISO(_laToday());
+  let head = '<div class="la-head-lane">Project</div>';
+  for (let i = 0; i < 14; i++) {
+    const iso = _laAddDays(_LA.rangeStart, i);
+    const f = _laFmtDayHead(iso);
+    const cls = iso === todayISO ? 'la-head-day today' : 'la-head-day';
+    head += `<div class="${cls}">${esc(f.dow)}<div class="la-day-num">${f.num}</div></div>`;
+  }
+  if (!_LA.overview.length) {
+    return `<div class="la-empty">No projects with cards in the 14-day window.</div>`;
+  }
+  const resource = $('laResourceFilter')?.value || '';
+  let body = '';
+  _LA.overview.forEach((row, idx) => {
+    const gridRow = 2 + idx;
+    body += `<div class="la-lane-label" title="${esc(row.project)}" onclick="_laJumpToProject('${esc(row.project)}')" style="grid-row:${gridRow};cursor:pointer">${esc(row.project)}</div>`;
+    for (let i = 0; i < 14; i++) {
+      const iso = _laAddDays(_LA.rangeStart, i);
+      const cls = iso === todayISO ? 'la-day-cell today' : 'la-day-cell';
+      body += `<div class="${cls}" style="grid-row:${gridRow}"></div>`;
+    }
+    for (const card of row.cards) {
+      const style = _laBarStyle(card, gridRow);
+      // Overdue cards in overview are hidden (overview has no overdue gutter).
+      if (style.indexOf('2 / 3') !== -1) continue;
+      const highlight = resource && (card.resources||[]).some(r => String(r.resource_id) === String(resource));
+      const cls = highlight ? 'la-overview-bar highlight' : 'la-overview-bar';
+      // Overview grid lacks the overdue gutter (col 2 in project view),
+      // so shift the card columns left by one.
+      const shifted = style.replace(/grid-column: (\d+) \/ (\d+)/, (_m, s, e) =>
+        `grid-column: ${Number(s)-1} / ${Number(e)-1}`);
+      body += `<div class="${cls}" style="${shifted}" title="${esc(card.title)} — ${esc(card.assignee||'')}"
+                   onclick="_laJumpToProject('${esc(row.project)}','${esc(card.id)}')">${esc(card.title)}</div>`;
+    }
+  });
+  return `<div class="la-board overview">${head}${body}</div>`;
+}
+
+function _laJumpToProject(project, cardId) {
+  _LA.project = project;
+  localStorage.setItem('la.project', project);
+  setLookaheadMode('project');
+  const sel = $('laProjectSel');
+  if (sel) sel.value = project;
+  if (cardId) setTimeout(() => editLookaheadCard(cardId), 100);
+}
+
+// ── Drag-to-reschedule ────────────────────────────────────────────────────────
+
+function _laWireDragHandlers() {
+  // Use HTML5 drag; drop on a day cell to reschedule while preserving span.
+  const board = document.querySelector('#laBoardWrap .la-board');
+  if (!board) return;
+  board.querySelectorAll('.la-card[draggable]').forEach(el => {
+    el.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/card-id', el.dataset.cardId);
+      el.classList.add('dragging');
+    });
+    el.addEventListener('dragend', () => el.classList.remove('dragging'));
+  });
+  board.querySelectorAll('.la-day-cell').forEach((cell, idx) => {
+    // Lane grid layout: overdue gutter at idx 0, then 14 day cells per lane.
+    // idx%15 gives position within a lane (0 = overdue, 1..14 = day 0..13).
+    cell.addEventListener('dragover', (e) => e.preventDefault());
+    cell.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      const id = e.dataTransfer.getData('text/card-id');
+      const pos = idx % 15;
+      if (!id || pos === 0) return;
+      const dayOffset = pos - 1;
+      const newStart  = _laAddDays(_LA.rangeStart, dayOffset);
+      const card = _LA.cards.find(c => c.id === id);
+      if (!card) return;
+      const span = _laDayDiff(card.start_date, card.end_date);
+      const newEnd = _laAddDays(newStart, Math.max(0, span));
+      try {
+        await api(`/lookahead/cards/${id}`, 'PATCH',
+                  { start_date: newStart, end_date: newEnd });
+        await _laLoadData();
+        renderLookahead();
+      } catch(err) { alert('Reschedule failed: ' + err.message); }
+    });
+  });
+}
+
+// ── Card editor modal ────────────────────────────────────────────────────────
+
+function openLookaheadCardEditor() {
+  if (!_LA.project) { alert('Select a project first.'); return; }
+  _LA.editingCard = null;
+  _laShowCardModal({
+    id: '',
+    title: '',
+    project: _LA.project,
+    assignee: '',
+    start_date: _LA.rangeStart,
+    end_date:   _LA.rangeStart,
+    start_shift_num: 1,
+    end_shift_num:   1,
+    status: 'planned',
+    notes: '',
+    depends_on: [],
+    links: [],
+    resources: [],
+  });
+}
+
+async function editLookaheadCard(cardId) {
+  let card;
+  try { card = await api(`/lookahead/cards/${cardId}`); }
+  catch(e) { alert('Failed to load card: ' + e.message); return; }
+  _LA.editingCard = card;
+  _laShowCardModal(card);
+}
+
+function _laShowCardModal(card) {
+  $('laModalTitle').textContent = card.id ? `Card — ${card.title}` : 'New card';
+  const assignees = [...new Set(_LA.cards.map(c => c.assignee).filter(Boolean))];
+  const bomRows = (card.resources || []).map((r, i) => `
+    <div class="la-bom-row" data-bom-idx="${i}">
+      <span style="flex:1">${esc(r.name)} <span style="color:var(--muted)">(${esc(r.type)})</span></span>
+      <span class="la-bom-status ${esc(r.status)}" onclick="_laCycleBom(${i})">${esc(r.status)}</span>
+      <input type="number" step="0.5" min="0" value="${r.quantity}" data-qty="${i}"
+             style="width:64px;padding:2px 4px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:11px">
+      <button class="ia" style="padding:1px 6px;font-size:10px" onclick="_laRemoveBom(${i})">✕</button>
+    </div>
+  `).join('');
+  const resOptions = _LA.resources.map(r =>
+    `<option value="${r.id}">${esc(r.name)} (${esc(r.type)})</option>`).join('');
+
+  const linkRows = (card.links || []).map((l, i) => `
+    <div class="la-bom-row" data-link-idx="${i}">
+      <span class="la-chip">${esc(l.type)}</span>
+      <span style="flex:1;font-family:monospace;font-size:11px">${esc(l.id)}</span>
+      <button class="ia" style="padding:1px 6px;font-size:10px" onclick="_laRemoveLink(${i})">✕</button>
+    </div>
+  `).join('');
+
+  $('laModalBody').innerHTML = `
+    <div class="la-field-row">
+      <div class="la-field" style="flex:2">
+        <label>Title</label>
+        <input id="laCardTitle" type="text" value="${esc(card.title)}">
+      </div>
+      <div class="la-field">
+        <label>Assignee</label>
+        <input id="laCardAssignee" type="text" list="laAssigneeList" value="${esc(card.assignee)}">
+        <datalist id="laAssigneeList">${assignees.map(a => `<option value="${esc(a)}">`).join('')}</datalist>
+      </div>
+    </div>
+    <div class="la-field-row">
+      <div class="la-field">
+        <label>Start date</label>
+        <input id="laCardStart" type="date" value="${esc(card.start_date)}">
+      </div>
+      <div class="la-field" style="max-width:100px">
+        <label>Shift</label>
+        <select id="laCardStartShift">${[1,2,3].map(n => `<option value="${n}" ${n===card.start_shift_num?'selected':''}>${n}</option>`).join('')}</select>
+      </div>
+      <div class="la-field">
+        <label>End date</label>
+        <input id="laCardEnd" type="date" value="${esc(card.end_date)}">
+      </div>
+      <div class="la-field" style="max-width:100px">
+        <label>Shift</label>
+        <select id="laCardEndShift">${[1,2,3].map(n => `<option value="${n}" ${n===card.end_shift_num?'selected':''}>${n}</option>`).join('')}</select>
+      </div>
+    </div>
+    <div class="la-field-row">
+      <div class="la-field">
+        <label>Status</label>
+        <select id="laCardStatus">
+          ${['planned','in_progress','done','blocked'].map(s =>
+            `<option value="${s}" ${s===card.status?'selected':''}>${s}</option>`).join('')}
+        </select>
+      </div>
+      <div class="la-field" style="flex:2">
+        <label>Notes</label>
+        <input id="laCardNotes" type="text" value="${esc(card.notes||'')}">
+      </div>
+    </div>
+
+    <div class="la-field">
+      <label>Resources / BOM</label>
+      <div id="laBomList">${bomRows}</div>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <select id="laBomPicker" style="flex:1;padding:3px 7px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:11px">
+          <option value="">— add resource —</option>${resOptions}
+        </select>
+        <button class="ia" onclick="_laAddBom()" style="padding:3px 8px;font-size:11px">Add</button>
+      </div>
+    </div>
+
+    <div class="la-field">
+      <label>Linked items</label>
+      <div id="laLinkList">${linkRows}</div>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <select id="laLinkType" style="padding:3px 7px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:11px">
+          <option value="todo">todo</option>
+          <option value="situation">situation</option>
+          <option value="key_date">key_date</option>
+        </select>
+        <input id="laLinkId" type="text" placeholder="target id" style="flex:1;padding:3px 7px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:11px">
+        <button class="ia" onclick="_laAddLink()" style="padding:3px 8px;font-size:11px">Add</button>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button class="detail-save" onclick="_laSaveCard()" style="padding:5px 14px">${card.id ? 'Save' : 'Create'}</button>
+      ${card.id ? `<button class="ia" onclick="_laDeleteCard('${esc(card.id)}')" style="padding:4px 10px;color:var(--red)">Delete</button>` : ''}
+      <button class="ia" onclick="closeLaModal()" style="padding:4px 10px;margin-left:auto">Cancel</button>
+    </div>
+  `;
+  _LA.editingCard = card;   // used by BOM/link mutator helpers
+  _laShowModal();
+}
+
+function _laCycleBom(idx) {
+  const states = ['needed','secured','consumed'];
+  const r = _LA.editingCard.resources[idx];
+  r.status = states[(states.indexOf(r.status) + 1) % states.length];
+  _laShowCardModal(_LA.editingCard);
+}
+
+function _laRemoveBom(idx) {
+  // Sync live qty inputs before re-render
+  _laSyncBomQuantities();
+  _LA.editingCard.resources.splice(idx, 1);
+  _laShowCardModal(_LA.editingCard);
+}
+
+function _laAddBom() {
+  _laSyncBomQuantities();
+  const picker = $('laBomPicker');
+  const rid = picker?.value;
+  if (!rid) return;
+  const res = _LA.resources.find(r => String(r.id) === String(rid));
+  if (!res) return;
+  if (!_LA.editingCard.resources) _LA.editingCard.resources = [];
+  if (_LA.editingCard.resources.some(r => String(r.resource_id) === String(rid))) return;
+  _LA.editingCard.resources.push({
+    resource_id: res.id, name: res.name, type: res.type,
+    quantity: 1, status: 'needed',
+  });
+  _laShowCardModal(_LA.editingCard);
+}
+
+function _laSyncBomQuantities() {
+  document.querySelectorAll('#laBomList [data-qty]').forEach(inp => {
+    const i = Number(inp.dataset.qty);
+    if (_LA.editingCard.resources[i]) {
+      _LA.editingCard.resources[i].quantity = Number(inp.value) || 1;
+    }
+  });
+}
+
+function _laRemoveLink(idx) {
+  _LA.editingCard.links.splice(idx, 1);
+  _laShowCardModal(_LA.editingCard);
+}
+
+function _laAddLink() {
+  const t = $('laLinkType')?.value;
+  const id = ($('laLinkId')?.value || '').trim();
+  if (!id) return;
+  if (!_LA.editingCard.links) _LA.editingCard.links = [];
+  _LA.editingCard.links.push({ type: t, id });
+  _laShowCardModal(_LA.editingCard);
+}
+
+async function _laSaveCard() {
+  _laSyncBomQuantities();
+  const card = _LA.editingCard;
+  const payload = {
+    title:           $('laCardTitle').value.trim(),
+    project:         _LA.project,
+    assignee:        $('laCardAssignee').value.trim(),
+    start_date:      $('laCardStart').value,
+    end_date:        $('laCardEnd').value,
+    start_shift_num: Number($('laCardStartShift').value),
+    end_shift_num:   Number($('laCardEndShift').value),
+    status:          $('laCardStatus').value,
+    notes:           $('laCardNotes').value,
+    depends_on:      card.depends_on || [],
+    links:           card.links      || [],
+    resources:       (card.resources || []).map(r => ({
+      resource_id: r.resource_id, quantity: r.quantity, status: r.status,
+    })),
+  };
+  if (!payload.title) { alert('Title is required.'); return; }
+  if (!payload.start_date || !payload.end_date) { alert('Dates are required.'); return; }
+  try {
+    if (card.id) await api(`/lookahead/cards/${card.id}`, 'PATCH', payload);
+    else         await api('/lookahead/cards', 'POST', payload);
+    closeLaModal();
+    await _laLoadData();
+    renderLookahead();
+  } catch(e) { alert('Save failed: ' + e.message); }
+}
+
+async function _laDeleteCard(cardId) {
+  if (!confirm('Delete this card?')) return;
+  try {
+    await api(`/lookahead/cards/${cardId}`, 'DELETE');
+    closeLaModal();
+    await _laLoadData();
+    renderLookahead();
+  } catch(e) { alert('Delete failed: ' + e.message); }
+}
+
+// ── Resources modal ──────────────────────────────────────────────────────────
+
+function openResourcesModal() {
+  _laLoadResources().then(() => {
+    $('laModalTitle').textContent = 'Resources (global catalog)';
+    const rows = _LA.resources.map(r => `
+      <tr data-res-id="${r.id}">
+        <td style="padding:4px 8px"><input type="text" value="${esc(r.name)}" data-field="name" style="width:100%;padding:2px 5px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:11px"></td>
+        <td style="padding:4px 8px"><select data-field="type" style="padding:2px 5px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:11px">
+          ${['person','equipment','space','part','supply'].map(t => `<option value="${t}" ${t===r.type?'selected':''}>${t}</option>`).join('')}
+        </select></td>
+        <td style="padding:4px 8px"><input type="text" value="${esc(r.notes||'')}" data-field="notes" style="width:100%;padding:2px 5px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:11px"></td>
+        <td style="padding:4px 8px;display:flex;gap:4px">
+          <button class="ia" style="padding:1px 6px;font-size:10px" onclick="_laSaveResource(${r.id})">Save</button>
+          <button class="ia" style="padding:1px 6px;font-size:10px;color:var(--red)" onclick="_laDeleteResource(${r.id})">✕</button>
+        </td>
+      </tr>`).join('');
+    $('laModalBody').innerHTML = `
+      <table style="width:100%;border-collapse:collapse;font-size:11px">
+        <thead><tr style="border-bottom:1px solid var(--border2);text-align:left">
+          <th style="padding:6px 8px">Name</th><th style="padding:6px 8px">Type</th><th style="padding:6px 8px">Notes</th><th></th>
+        </tr></thead>
+        <tbody id="laResRows">${rows}</tbody>
+      </table>
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border2);display:flex;gap:8px;align-items:flex-end">
+        <div class="la-field" style="flex:1;margin:0"><label>Add new</label><input id="laNewResName" type="text" placeholder="Resource name…"></div>
+        <div class="la-field" style="margin:0"><label>Type</label>
+          <select id="laNewResType">${['person','equipment','space','part','supply'].map(t => `<option value="${t}">${t}</option>`).join('')}</select>
+        </div>
+        <button class="detail-save" onclick="_laCreateResource()" style="padding:5px 14px">Create</button>
+      </div>`;
+    _laShowModal();
+  });
+}
+
+async function _laCreateResource() {
+  const name = $('laNewResName').value.trim();
+  const type = $('laNewResType').value;
+  if (!name) return;
+  try {
+    await api('/lookahead/resources', 'POST', { name, type });
+    openResourcesModal();
+  } catch(e) { alert('Create failed: ' + e.message); }
+}
+
+async function _laSaveResource(id) {
+  const row = document.querySelector(`tr[data-res-id="${id}"]`);
+  if (!row) return;
+  const payload = {
+    name:  row.querySelector('[data-field="name"]').value.trim(),
+    type:  row.querySelector('[data-field="type"]').value,
+    notes: row.querySelector('[data-field="notes"]').value,
+  };
+  try {
+    await api(`/lookahead/resources/${id}`, 'PATCH', payload);
+    await _laLoadResources();
+  } catch(e) { alert('Save failed: ' + e.message); }
+}
+
+async function _laDeleteResource(id) {
+  if (!confirm('Delete this resource? Any card BOM entries referencing it will also be removed.')) return;
+  try {
+    await api(`/lookahead/resources/${id}`, 'DELETE');
+    openResourcesModal();
+  } catch(e) { alert('Delete failed: ' + e.message); }
+}
+
+// ── Project shifts modal ─────────────────────────────────────────────────────
+
+async function openShiftsModal() {
+  if (!_LA.project) { alert('Select a project first.'); return; }
+  let shifts;
+  try { shifts = await api(`/lookahead/shifts?project=${encodeURIComponent(_LA.project)}`); }
+  catch(e) { alert('Failed to load shifts: ' + e.message); return; }
+  const byNum = {};
+  for (const s of shifts || []) byNum[s.shift_num] = s;
+  $('laModalTitle').textContent = `Shifts — ${_LA.project}`;
+  const blocks = [1,2,3].map(n => {
+    const s = byNum[n] || {};
+    return `<div style="padding:10px 0;border-bottom:1px solid var(--border2)">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Shift ${n}</div>
+      <div class="la-field-row">
+        <div class="la-field"><label>Label</label><input type="text" id="laShift${n}Label" value="${esc(s.label||'')}" placeholder="1st / 2nd / 3rd"></div>
+        <div class="la-field"><label>Start</label><input type="time" id="laShift${n}Start" value="${esc(s.start_time||'')}"></div>
+        <div class="la-field"><label>End</label><input type="time" id="laShift${n}End" value="${esc(s.end_time||'')}"></div>
+        <div class="la-field" style="flex:1.4"><label>Days</label><input type="text" id="laShift${n}Days" value="${esc(s.days||'')}" placeholder="M,T,W,Th"></div>
+        <div class="la-field" style="justify-content:flex-end;max-width:110px"><label>&nbsp;</label>
+          <button class="detail-save" onclick="_laSaveShift(${n})" style="padding:4px 10px">Save</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+  $('laModalBody').innerHTML = blocks + `
+    <div style="margin-top:10px;font-size:11px;color:var(--muted)">Days use short codes: M,T,W,Th,F,Sa,Su — comma-separated.</div>`;
+  _laShowModal();
+}
+
+async function _laSaveShift(n) {
+  const payload = {
+    label:      $(`laShift${n}Label`).value.trim(),
+    start_time: $(`laShift${n}Start`).value,
+    end_time:   $(`laShift${n}End`).value,
+    days:       $(`laShift${n}Days`).value.trim(),
+  };
+  try {
+    await api(`/lookahead/shifts/${encodeURIComponent(_LA.project)}/${n}`, 'PUT', payload);
+    $('statusMsg').textContent = `Shift ${n} saved.`;
+    // Refresh the board so shift chips pick up new labels.
+    await _laLoadData();
+  } catch(e) { alert('Save failed: ' + e.message); }
+}
+
+// ── Modal plumbing ───────────────────────────────────────────────────────────
+
+function _laShowModal() {
+  $('laModalBackdrop').style.display = '';
+  $('laModal').style.display = '';
+}
+
+function closeLaModal() {
+  $('laModalBackdrop').style.display = 'none';
+  $('laModal').style.display = 'none';
+  _LA.editingCard = null;
+}
+
 </script>
 </body>
 </html>

@@ -457,6 +457,20 @@ Add to crontab:
 
 Both sidecars POST to `/page/api/ingest`. The API deduplicates by message ID so re-running is safe.
 
+## Look-ahead board
+
+A two-week planning view that sits alongside todos, situations, and intel. Each project gets its own 14-day board; a global overview rolls up every project sorted by the earliest card start. Cards are UUID-keyed, carry a status (`planned`, `in_progress`, `done`, `blocked`), optional assignee, start/end date + shift, and three kinds of relations:
+
+- **Dependencies** — other look-ahead cards that must finish first
+- **Links** — cross-system references to `todo`, `situation`, or `key_date` targets
+- **Resources (BOM)** — entries from the global resource catalog with a per-card status of `needed` / `secured` / `consumed`
+
+Resources are typed (`person`, `equipment`, `space`, `part`, `supply`) and shared across all projects. Each project owns its own shift schedule (up to 6 shifts per day with human-readable `HH:MM` start/end and a comma-separated day-of-week mask like `M,T,W,Th,F`).
+
+Open the board from the vertical tab rail. Use the toolbar to switch between overview and a specific project, filter by assignee / status / resource (including a "missing resources" preset that surfaces cards with unsecured BOM items), drag a card between days to reschedule, or click a card to edit its BOM and cross-system links. The "Resources" and "⚙ Shifts" buttons open catalog / schedule editors. Phase one is local-only; templates (#49) and LLM-driven cross-system linking (#50) land in follow-up issues.
+
+The board is mobile-friendly — on narrow screens the 14-day grid collapses to a vertical day-list so the view works on foldables.
+
 ## Seed workflow
 
 The seed workflow bootstraps project intelligence from existing data when you first set up Parsival, or after adding new projects. It walks through a guided state machine:
@@ -639,6 +653,27 @@ The contacts table is a long-lived directory of every person Parsival has seen a
 Live ingestion is automatic: every time the analysis pipeline saves an item, both passes run in the background — header scraping populates the row from To/CC/author, then the signature parser enriches it from the email body. Failures in either pass are swallowed so they never block analysis.
 
 **Provenance and manual edits.** Each editable field on a contact carries a `*_source` tag of `header`, `signature`, or `manual`. The signature parser tags every field it writes with the corresponding confidence score (stored in `signature_confidence`) and **never** overwrites a field that has been edited by hand — those are tracked in `manually_edited_fields` and the editor flips them to `manual` automatically when you save. Re-running `/contacts/reparse-signatures` is therefore safe: it will fill in gaps from new emails and refresh confidence scores, but it cannot clobber your edits.
+
+### Look-ahead
+
+See [Look-ahead board](#look-ahead-board) for an overview of the feature. All endpoints return JSON.
+
+| Method   | Path                                              | Description                                                                                       |
+|----------|---------------------------------------------------|---------------------------------------------------------------------------------------------------|
+| `GET`    | `/lookahead/cards`                                | List cards (params: `project`, `start`, `end` — date overlap filter). Each card includes inlined `depends_on`, `links`, and `resources` |
+| `GET`    | `/lookahead/cards/{id}`                           | Fetch a single card with all relations                                                            |
+| `POST`   | `/lookahead/cards`                                | Create a card. Required: `title`, `project`, `start_date`, `start_shift_num`, `end_date`, `end_shift_num`. Optional: `assignee`, `status`, `depends_on`, `links`, `resources`. Returns the created card with a generated UUID |
+| `PATCH`  | `/lookahead/cards/{id}`                           | Update any subset of card fields. Passing `depends_on`, `links`, or `resources` replaces the relation set; self-dependencies are silently dropped |
+| `DELETE` | `/lookahead/cards/{id}`                           | Delete a card. Cascades through `depends_on`, `links`, and BOM rows                               |
+| `PATCH`  | `/lookahead/cards/{card_id}/resources/{res_id}`   | Toggle a single BOM row's status (`needed` / `secured` / `consumed`) without rewriting the whole resource list |
+| `GET`    | `/lookahead/resources`                            | List the resource catalog (param: `type`)                                                         |
+| `POST`   | `/lookahead/resources`                            | Create a resource (`{"name", "type", "notes"}`). Types: `person`, `equipment`, `space`, `part`, `supply` |
+| `PATCH`  | `/lookahead/resources/{id}`                       | Update a resource                                                                                 |
+| `DELETE` | `/lookahead/resources/{id}`                       | Delete a resource and cascade-remove its BOM references                                           |
+| `GET`    | `/lookahead/shifts`                               | List shift schedules (param: `project`)                                                           |
+| `PUT`    | `/lookahead/shifts/{project}/{shift_num}`         | Upsert a shift (1..6). Body: `{"label", "start_time", "end_time", "days"}` — times are `HH:MM`, days a comma-separated mask like `M,T,W,Th,F` |
+| `DELETE` | `/lookahead/shifts/{project}/{shift_num}`         | Delete a single shift row                                                                         |
+| `GET`    | `/lookahead/overview`                             | Cross-project rollup: one row per project sorted by earliest card start, each with its full card list |
 
 ## Request logging
 

@@ -406,6 +406,198 @@ def _spawn_situation_task(item_id: str) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+# ── Split / merge ────────────────────────────────────────────────────────────
+
+def _rescore_lightweight(sit_id: str, item_ids: list) -> None:
+    """
+    Recompute ``score``, ``priority``, ``sources``, ``last_updated``, and
+    ``project_tag`` for a situation without invoking the LLM.
+
+    Used after split/merge so the caller sees a consistent record without
+    paying for synthesis.  The user can trigger full rescoring via
+    ``POST /situations/{id}/rescore``.
+    """
+    with db.lock:
+        records = [db.get_item(iid) for iid in item_ids]
+    records = [r for r in records if r]
+    if not records:
+        return
+    score    = _correlator.score_situation(item_ids, records)
+    max_pri  = max(records, key=lambda r: _pri_rank(r.get("priority", "low")))
+    sources  = list(set(r.get("source", "") for r in records))
+    last_ts  = max((r.get("timestamp", "") for r in records), default=now_iso())
+    all_proj = set()
+    for r in records:
+        all_proj.update(db.parse_project_tags(r.get("project_tag")))
+    proj_tag_val = db.serialize_project_tags(sorted(all_proj)) if all_proj else None
+    with db.lock:
+        db.update_situation(sit_id, {
+            "item_ids":         item_ids,
+            "sources":          sources,
+            "score":            score,
+            "priority":         max_pri.get("priority", "medium"),
+            "last_updated":     last_ts,
+            "project_tag":      proj_tag_val,
+            "score_updated_at": now_iso(),
+        })
+
+
+def split_situation(
+    sit_id: str,
+    item_ids_to_split: list[str],
+    new_title: str | None = None,
+) -> str:
+    """
+    Move a subset of items out of ``sit_id`` into a brand-new situation.
+
+    Both situations are rescored lightweight (no LLM).  The caller gets back
+    the new situation's UUID so the UI can focus it.
+
+    :raises ValueError: if ``item_ids_to_split`` is empty, contains ids not in
+                        the source situation, or would leave either situation
+                        empty.
+    """
+    with db.lock:
+        src = db.get_situation(sit_id)
+    if not src:
+        raise ValueError("situation not found")
+    src_ids = list(src.get("item_ids", []))
+    if not item_ids_to_split:
+        raise ValueError("item_ids_to_split is empty")
+    unknown = [i for i in item_ids_to_split if i not in src_ids]
+    if unknown:
+        raise ValueError(f"items not in source situation: {unknown}")
+    remaining = [i for i in src_ids if i not in item_ids_to_split]
+    if not remaining:
+        raise ValueError("split would empty the source situation — dismiss or keep at least one item")
+    if len(item_ids_to_split) == len(src_ids):
+        raise ValueError("cannot split all items — would empty source")
+
+    new_sit_id = str(_uuid.uuid4())
+    title = new_title or f"{src.get('title','Split')} (split)"
+    sit_doc = {
+        "situation_id":     new_sit_id,
+        "title":            title,
+        "summary":          src.get("summary") or "",
+        "status":           src.get("status") or "in_progress",
+        "item_ids":         item_ids_to_split,
+        "sources":          [],
+        "project_tag":      None,
+        "score":            0.0,
+        "priority":         src.get("priority") or "medium",
+        "open_actions":     [],
+        "references":       [],
+        "key_context":      None,
+        "last_updated":     now_iso(),
+        "created_at":       now_iso(),
+        "score_updated_at": now_iso(),
+        "dismissed":        False,
+        "lifecycle_status": "new",
+        "notes":            f"Split from {sit_id}",
+    }
+    with db.lock:
+        db.insert_situation(sit_doc)
+        for iid in item_ids_to_split:
+            db.update_item(iid, {"situation_id": new_sit_id})
+        db.insert_situation_event(new_sit_id, None, "new", f"split from {sit_id}")
+        db.insert_situation_event(sit_id, None, src.get("lifecycle_status") or "new",
+                                  f"split {len(item_ids_to_split)} item(s) to {new_sit_id}")
+    _rescore_lightweight(sit_id, remaining)
+    _rescore_lightweight(new_sit_id, item_ids_to_split)
+    return new_sit_id
+
+
+def merge_situations(target_id: str, source_id: str) -> None:
+    """
+    Merge ``source_id`` into ``target_id``.
+
+    All source items are relinked to the target, the target is rescored
+    lightweight, and the source is dismissed with reason ``merged_into:<id>``
+    so history is preserved.
+
+    :raises ValueError: if either situation is missing or target == source.
+    """
+    if target_id == source_id:
+        raise ValueError("target and source must differ")
+    with db.lock:
+        target = db.get_situation(target_id)
+        source = db.get_situation(source_id)
+    if not target or not source:
+        raise ValueError("target or source situation not found")
+
+    combined_ids = list(target.get("item_ids", []))
+    for iid in source.get("item_ids", []):
+        if iid not in combined_ids:
+            combined_ids.append(iid)
+
+    with db.lock:
+        for iid in source.get("item_ids", []):
+            db.update_item(iid, {"situation_id": target_id})
+        prev = source.get("lifecycle_status", "new")
+        db.update_situation(source_id, {
+            "dismissed":        1,
+            "dismiss_reason":   f"merged_into:{target_id}",
+            "lifecycle_status": "dismissed",
+            "item_ids":         [],
+        })
+        db.insert_situation_event(source_id, prev, "dismissed",
+                                  f"merged into {target_id}")
+        db.insert_situation_event(target_id, None,
+                                  target.get("lifecycle_status") or "new",
+                                  f"merged in {source_id} "
+                                  f"({len(source.get('item_ids', []))} items)")
+    _rescore_lightweight(target_id, combined_ids)
+
+
+# ── Stale-decay helpers ──────────────────────────────────────────────────────
+
+# A situation in "waiting" for this many days without activity is flagged stale.
+STALE_WAITING_DAYS       = 7
+# A situation in "investigating" for this many days without activity is flagged.
+STALE_INVESTIGATING_DAYS = 14
+
+
+def _days_since(ts: str | None) -> float | None:
+    """Return days between ``ts`` (ISO string) and now, or None if unparseable."""
+    if not ts:
+        return None
+    try:
+        s = ts.replace("Z", "+00:00") if ts.endswith("Z") else ts
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
+    except Exception:
+        return None
+
+
+def _compute_stale_flag(sit: dict) -> str | None:
+    """
+    Return a stale-decay label for ``sit`` or None if it's fresh.
+
+    Labels:
+      * ``"stale_waiting"``       — in ``waiting`` ≥ STALE_WAITING_DAYS with no
+        event newer than that threshold.
+      * ``"stale_investigating"`` — in ``investigating`` ≥
+        STALE_INVESTIGATING_DAYS with no event newer than that threshold.
+    """
+    lifecycle = sit.get("lifecycle_status", "")
+    if lifecycle not in ("waiting", "investigating"):
+        return None
+    threshold = STALE_WAITING_DAYS if lifecycle == "waiting" else STALE_INVESTIGATING_DAYS
+    try:
+        events = db.get_situation_events(sit.get("situation_id"))
+    except Exception:
+        events = []
+    # Find the most recent event *timestamp*; fall back to last_updated.
+    latest_event_ts = max((e.get("timestamp") or "" for e in events), default="")
+    ref_ts = latest_event_ts or sit.get("last_updated")
+    age_days = _days_since(ref_ts)
+    if age_days is not None and age_days >= threshold:
+        return f"stale_{lifecycle}"
+    return None
+
+
 # ── Response builder ───────────────────────────────────────────────────────────
 
 def _situation_response(sit: dict) -> dict:
@@ -465,4 +657,5 @@ def _situation_response(sit: dict) -> dict:
         "notes":           sit.get("notes", ""),
         "item_count":      len(items),
         "items":           items,
+        "stale_flag":      _compute_stale_flag(sit),
     }

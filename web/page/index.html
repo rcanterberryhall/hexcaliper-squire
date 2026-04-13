@@ -789,6 +789,29 @@ tr.attn-low  { opacity:0.65; }
 .pri-reason-skip:hover   { color: var(--text); border-color: var(--text); }
 .pri-reason-cancel:hover { color: var(--red);  border-color: var(--red);  }
 
+/* ── Situation split modal ── */
+.split-list {
+  max-height: 320px; overflow-y: auto;
+  border: 1px solid var(--border2); border-radius: var(--r); padding: 4px;
+}
+.split-row {
+  display: flex; align-items: center; gap: 6px; padding: 6px 4px;
+  border-bottom: 1px solid var(--border); cursor: pointer; font-size: 12px;
+}
+.split-row:last-child { border-bottom: none; }
+.split-row:hover      { background: rgba(255,255,255,.03); }
+.split-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Stale situation indicator ── */
+.sit-stale-badge {
+  display: inline-block; margin-left: 6px;
+  font-size: 9px; letter-spacing: .1em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 3px;
+  background: var(--amber); color: #1a1a1a; font-weight: 600;
+}
+.sit-stale-badge.sit-stale_investigating { background: var(--red); color: #fff; }
+.situation-card.sit-stale { border-left: 3px solid var(--amber); }
+
 /* ── Hamburger / sidebar backdrop ── */
 .menu-btn {
   display: none; background: none; border: 1px solid var(--border2);
@@ -1331,6 +1354,21 @@ tr.attn-low  { opacity:0.65; }
     <div class="help-section">
       <h3>Priority override feedback</h3>
       <p>When you change an item's priority in the detail panel, Parsival prompts for a one-click reason: <em>this person matters</em>, <em>this topic is hot right now</em>, <em>deadline is real</em>, or <em>other</em>. The override is stored and injected into future analysis prompts as a learned rule, so the LLM can weight similar items correctly next time. Pick <em>Skip</em> to change the priority without recording a reason.</p>
+    </div>
+
+    <div class="help-section">
+      <h3>Split / merge situations</h3>
+      <p>The correlator occasionally lumps together items that shouldn't be one situation, or splits threads that belong together. Two buttons in each situation card let you fix it by hand:</p>
+      <dl class="help-kv">
+        <dt>⎇ Split</dt><dd>Open a checklist of the current items, tick the ones that belong in a brand-new situation, and optionally give it a title. The source keeps the rest; both are lightweight-rescored without re-running the LLM.</dd>
+        <dt>⛒ Merge</dt><dd>Pick another active situation; its items are absorbed into this one and the source is dismissed with reason <em>merged_into</em> for auditability.</dd>
+      </dl>
+      <p>Use <strong>↺ Resynth</strong> afterwards if you want the LLM to regenerate titles and summaries.</p>
+    </div>
+
+    <div class="help-section">
+      <h3>Stale situation flag</h3>
+      <p>Situations in <em>waiting</em> with no activity for 7 days, or in <em>investigating</em> for 14 days, get an amber <strong>stale</strong> badge. This is a nudge to either transition the lifecycle (to resolved/dismissed) or take action — Parsival won't auto-close anything.</p>
     </div>
 
     <div class="help-section">
@@ -2509,13 +2547,18 @@ function situationCard(s) {
   const sitActions = ls === 'dismissed'
     ? `<button class="restore-btn" onclick="event.stopPropagation();restoreSituation('${esc(s.situation_id)}')" title="Restore">↩ restore</button>`
     : `<button class="ia" onclick="event.stopPropagation();resynthSituation('${esc(s.situation_id)}')" title="Re-synthesize">↺</button>
-       <button class="ia deep-analysis-btn" id="da-btn-${esc(s.situation_id)}" onclick="event.stopPropagation();requestDeepAnalysis('${esc(s.situation_id)}')" title="Submit for deep analysis via merLLM batch queue">⚗</button>`;
+       <button class="ia deep-analysis-btn" id="da-btn-${esc(s.situation_id)}" onclick="event.stopPropagation();requestDeepAnalysis('${esc(s.situation_id)}')" title="Submit for deep analysis via merLLM batch queue">⚗</button>
+       <button class="ia" onclick="event.stopPropagation();openSplitSituation('${esc(s.situation_id)}')" title="Split: move some items into a new situation" ${(s.item_count||0) < 2 ? 'disabled style=\"opacity:0.3;cursor:not-allowed\"' : ''}>⎇</button>
+       <button class="ia" onclick="event.stopPropagation();openMergeSituation('${esc(s.situation_id)}')" title="Merge another situation into this one">⛒</button>`;
+  const staleBadge = s.stale_flag
+    ? `<span class="sit-stale-badge sit-${esc(s.stale_flag)}" title="No activity — consider following up or transitioning">stale</span>`
+    : '';
   return `
-    <div class="situation-card ${sc}${ls==='dismissed'?' row-hidden':''}${overdue?' sit-overdue':''}" id="sit-${esc(s.situation_id)}">
+    <div class="situation-card ${sc}${ls==='dismissed'?' row-hidden':''}${overdue?' sit-overdue':''}${s.stale_flag?' sit-stale':''}" id="sit-${esc(s.situation_id)}">
       <div class="sit-header" onclick="toggleSituationEvidence('${esc(s.situation_id)}')">
         <div class="sit-score">${overdueIcon}${score}</div>
         <div class="sit-main">
-          <div class="sit-title">${esc(s.title)}</div>
+          <div class="sit-title">${esc(s.title)}${staleBadge}</div>
           <div class="sit-summary">${esc(s.summary)}</div>
           <div class="sit-meta">
             <div class="sit-src-dots">${srcDots}</div>
@@ -2605,6 +2648,108 @@ async function resynthSituation(sitId) {
     renderSituations(allSituations);
     $('statusMsg').textContent = 'Situation updated.';
   } catch(e) { $('statusMsg').textContent = 'Resynth failed: ' + e.message; }
+}
+
+async function openSplitSituation(sitId) {
+  const sit = allSituations.find(s => s.situation_id === sitId);
+  if (!sit || !sit.items || sit.items.length < 2) {
+    $('statusMsg').textContent = 'Need at least 2 items to split.';
+    return;
+  }
+  // Build a quick checkbox list of items
+  const rows = sit.items.map(i =>
+    `<label class="split-row">
+      <input type="checkbox" value="${esc(i.item_id)}">
+      <span class="badge b-${i.source}">${i.source}</span>
+      <span class="split-title">${esc(i.title || i.item_id)}</span>
+      <span class="pri-${i.priority||'low'}">${i.priority||'low'}</span>
+    </label>`
+  ).join('');
+  const overlay = document.createElement('div');
+  overlay.className = 'pri-reason-overlay';
+  overlay.innerHTML = `
+    <div class="pri-reason-modal" style="max-width:560px">
+      <h3 style="margin-top:0">Split situation</h3>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px">
+        Select items to move into a new situation. At least one item must remain.
+      </div>
+      <div class="split-list">${rows}</div>
+      <input type="text" id="splitTitleInput" placeholder="New situation title (optional)"
+             style="width:100%;margin-top:10px;padding:6px;border:1px solid var(--border);
+                    background:var(--bg);color:var(--text);border-radius:4px">
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+        <button class="pri-reason-cancel" id="splitCancelBtn">Cancel</button>
+        <button class="pri-reason-btn" id="splitConfirmBtn">Split</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const cleanup = () => document.body.removeChild(overlay);
+  overlay.querySelector('#splitCancelBtn').onclick = cleanup;
+  overlay.querySelector('#splitConfirmBtn').onclick = async () => {
+    const picked = Array.from(overlay.querySelectorAll('input[type=checkbox]:checked'))
+                        .map(cb => cb.value);
+    const newTitle = (overlay.querySelector('#splitTitleInput').value || '').trim();
+    if (picked.length === 0) {
+      $('statusMsg').textContent = 'Pick at least one item to split out.';
+      return;
+    }
+    if (picked.length >= sit.items.length) {
+      $('statusMsg').textContent = 'Cannot split all items — leave at least one behind.';
+      return;
+    }
+    cleanup();
+    $('statusMsg').textContent = 'Splitting situation…';
+    try {
+      await api(`/situations/${encodeURIComponent(sitId)}/split`, 'POST',
+                {item_ids: picked, new_title: newTitle || null});
+      $('statusMsg').textContent = 'Split complete — refreshing.';
+      await loadSituations();
+    } catch(e) { $('statusMsg').textContent = 'Split failed: ' + e.message; }
+  };
+}
+
+async function openMergeSituation(targetId) {
+  const target = allSituations.find(s => s.situation_id === targetId);
+  if (!target) return;
+  const others = allSituations.filter(s =>
+    s.situation_id !== targetId && (s.lifecycle_status || 'new') !== 'dismissed'
+  );
+  if (others.length === 0) {
+    $('statusMsg').textContent = 'No other active situations to merge in.';
+    return;
+  }
+  const opts = others.map(s =>
+    `<option value="${esc(s.situation_id)}">${esc(s.title)} (${s.item_count} items)</option>`
+  ).join('');
+  const overlay = document.createElement('div');
+  overlay.className = 'pri-reason-overlay';
+  overlay.innerHTML = `
+    <div class="pri-reason-modal" style="max-width:500px">
+      <h3 style="margin-top:0">Merge into: ${esc(target.title)}</h3>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px">
+        Pick a situation whose items should move into this one. The source will be dismissed with reason "merged_into".
+      </div>
+      <select id="mergeSrcSel" style="width:100%;padding:6px;border:1px solid var(--border);
+             background:var(--bg);color:var(--text);border-radius:4px">${opts}</select>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+        <button class="pri-reason-cancel" id="mergeCancelBtn">Cancel</button>
+        <button class="pri-reason-btn" id="mergeConfirmBtn">Merge</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const cleanup = () => document.body.removeChild(overlay);
+  overlay.querySelector('#mergeCancelBtn').onclick = cleanup;
+  overlay.querySelector('#mergeConfirmBtn').onclick = async () => {
+    const sourceId = overlay.querySelector('#mergeSrcSel').value;
+    cleanup();
+    $('statusMsg').textContent = 'Merging…';
+    try {
+      await api(`/situations/${encodeURIComponent(targetId)}/merge`, 'POST',
+                {source_situation_id: sourceId});
+      $('statusMsg').textContent = 'Merge complete — refreshing.';
+      await loadSituations();
+    } catch(e) { $('statusMsg').textContent = 'Merge failed: ' + e.message; }
+  };
 }
 
 async function requestDeepAnalysis(sitId) {

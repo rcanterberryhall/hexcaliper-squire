@@ -2435,6 +2435,61 @@ def rescore_situation(situation_id: str):
     return situation_manager._situation_response(updated)
 
 
+@app.post("/situations/{situation_id}/split")
+def split_situation_endpoint(situation_id: str, body: dict):
+    """
+    Move a subset of items out of ``situation_id`` into a new situation.
+
+    :param body: ``{"item_ids": ["..."], "new_title": "<optional>"}``
+    :return: ``{"ok": True, "new_situation_id": "...", "original_situation_id": "..."}``
+    :raises HTTPException 400: If validation fails (empty subset, unknown ids,
+                               would empty the source).
+    :raises HTTPException 404: If the situation does not exist.
+    """
+    item_ids  = body.get("item_ids") or []
+    new_title = body.get("new_title")
+    if not isinstance(item_ids, list) or not item_ids:
+        raise HTTPException(status_code=400, detail="item_ids must be a non-empty list")
+    with db.lock:
+        sit = db.get_situation(situation_id)
+    if not sit:
+        raise HTTPException(status_code=404, detail="Situation not found")
+    try:
+        new_sit_id = situation_manager.split_situation(situation_id, item_ids, new_title)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "ok":                    True,
+        "new_situation_id":      new_sit_id,
+        "original_situation_id": situation_id,
+    }
+
+
+@app.post("/situations/{situation_id}/merge")
+def merge_situation_endpoint(situation_id: str, body: dict):
+    """
+    Merge ``source_situation_id`` into ``situation_id`` (target).
+
+    :param body: ``{"source_situation_id": "..."}``
+    :return: ``{"ok": True, "situation_id": "<target>"}``
+    :raises HTTPException 400: If validation fails (target == source, ids missing).
+    :raises HTTPException 404: If either situation does not exist.
+    """
+    source_id = body.get("source_situation_id")
+    if not source_id or not isinstance(source_id, str):
+        raise HTTPException(status_code=400, detail="source_situation_id required")
+    with db.lock:
+        tgt = db.get_situation(situation_id)
+        src = db.get_situation(source_id)
+    if not tgt or not src:
+        raise HTTPException(status_code=404, detail="Situation not found")
+    try:
+        situation_manager.merge_situations(situation_id, source_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "situation_id": situation_id}
+
+
 @app.patch("/situations/{situation_id}")
 def patch_situation(situation_id: str, body: dict):
     """

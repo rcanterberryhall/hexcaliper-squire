@@ -304,9 +304,20 @@ Each situation card has a status dropdown and a "follow up" date picker. Status 
 
 The situations list defaults to showing `new` + `investigating` + `waiting` statuses. Resolved/dismissed are accessible via a toggle. Situations in `waiting` status past their `follow_up_date` surface at the top with a visual indicator.
 
+**Stale-decay flag.** Situations in `waiting` for ≥ 7 days or in `investigating` for ≥ 14 days with no newer `situation_events` entry get a `stale_flag` of `stale_waiting` or `stale_investigating` respectively. The flag is advisory — nothing auto-closes; the UI renders an amber badge so the user can decide to transition the lifecycle.
+
+**Manual split / merge.** The correlator occasionally groups items that should be separate threads, or splits threads that belong together. Two endpoints fix that by hand:
+- `POST /situations/{id}/split` — move a subset of items into a brand-new situation. The source must retain at least one item; both situations are lightweight-rescored (no LLM).
+- `POST /situations/{id}/merge` — absorb another situation's items into this one. The source is dismissed with `dismiss_reason="merged_into:<target>"` so history is preserved.
+
+After a split or merge, run `POST /situations/{id}/rescore` to regenerate titles and summaries via the LLM.
+
 API additions:
-- `PATCH /situations/{id}` now accepts `status` field
+- `PATCH /situations/{id}` accepts `title`, `status`, `lifecycle_status`, `follow_up_date`, `notes`, `project_tag`
 - `GET /situations/{id}/events` — returns the status transition history
+- `POST /situations/{id}/split` — split a situation by item IDs
+- `POST /situations/{id}/merge` — merge another situation into this one
+- `POST /situations/{id}/transition` — explicit lifecycle transition with optional note and follow-up date
 
 ## Adaptive attention model
 
@@ -358,6 +369,46 @@ Shift passdown / handoff notes are detected deterministically before the LLM run
 - Any of the phrases: **"shift highlights"**, **"shift activities"**, **"shift notes"**, **"shift report"**, **"shift summary"**, **"shift handoff"**, **"shift update"**
 
 When a pattern matches, `is_passdown` is forced to `true` regardless of the LLM response. Passdown items receive `has_action=false` by default unless the content explicitly directs an action at you by name.
+
+## Passdown generator
+
+Parsival can assemble a shift-handoff email from recent activity. The 📋 Passdown button above the action list opens a modal with a live HTML preview and editable textarea. Five sections are emitted:
+
+1. **Open action items** — todos still open (highest priority first).
+2. **Active situations** — non-dismissed situations with their lifecycle status and open actions.
+3. **Upcoming deadlines** — next 12 hours of `due_at` todos and `follow_up_date` situations.
+4. **Recent high-priority items** — items flagged `high` in the look-back window.
+5. **Recently replied** — items with a `replied_at` in the window (a proxy for "closed loop today").
+
+The lookback window is user-selectable (6 h / 12 h / 24 h / 48 h / 1 week). Two copy buttons are exposed: **Copy HTML** (uses `ClipboardItem` with both `text/html` and `text/plain` payloads so Outlook preserves formatting) and **Copy text** (plain-text fallback). Nothing is sent automatically — the user owns the final message.
+
+API addition:
+- `POST /passdown/generate` — body: `{"hours": <int>}` (clamped to `1..168`). Returns `{"html": "...", "sections": {...}, "generated_at": "ISO", "hours": <int>}`.
+
+## Priority override feedback
+
+When the user changes an item's priority from the detail panel, the UI prompts for a one-click reason:
+
+- `person_matters` — this sender/author matters for me
+- `topic_hot` — this topic is hot right now
+- `deadline_real` — the deadline is actually binding
+- `other` — freeform / none of the above
+
+If the user picks a reason, the override (LLM-assigned priority, user-corrected priority, reason, item title snippet, timestamp) is appended to `settings.priority_overrides` (capped at the last 100 entries) and applied to `config.PRIORITY_OVERRIDES`. Future analysis prompts include a summary of recent overrides grouped by reason so the LLM can weight similar items correctly. Picking **Skip** changes the priority without recording a reason.
+
+The mechanism intentionally mirrors the existing `ASSIGNMENT_CORRECTIONS` pattern — feedback is prompt-injected at inference time rather than used to retrain anything.
+
+## Mobile layout
+
+Narrow viewports get progressive adaptations instead of a separate mobile build:
+
+| Breakpoint | Behavior |
+|---|---|
+| ≤ 768 px | Sidebar becomes an overlay drawer (☰ hamburger toggles). Items table hides Category / From / Summary / Time / Link columns. Detail panel and settings modal go full-screen. Interactive controls grow to ≥ 34 px tap targets. Situation-card actions wrap below the title row. |
+| ≤ 480 px | Items table also hides the Priority column (leaves Source + Title + actions). Topbar wordmark subtitle is hidden. |
+| ≤ 430 px | Foldable-folded outer display. `Seed` and `Re-analyze` are hidden from the topbar — run them from the unfolded view or a desktop session. Wordmark and situation typography tighten. |
+
+`web/page/` is nginx-volume-mounted, so CSS changes are picked up without rebuilding the image.
 
 ## Email ingestion (sidecar scripts)
 
@@ -460,7 +511,7 @@ Interactive docs: `http://localhost:8001/docs`
 | Method  | Path                        | Description                                                                        |
 |---------|-----------------------------|------------------------------------------------------------------------------------|
 | `GET`   | `/analyses`                 | All analysed items, newest first (params: `source`, `category`). Returns up to 200 |
-| `PATCH` | `/analyses/{item_id}`       | Update `priority`, `category`, `task_type`, `project_tag`, or `is_passdown`. Setting `category="noise"` also clears `has_action` and removes associated todos; changing `priority` syncs to associated todo rows. Categories: `task`, `approval`, `fyi`, `noise` |
+| `PATCH` | `/analyses/{item_id}`       | Update `priority`, `category`, `task_type`, `project_tag`, or `is_passdown`. Setting `category="noise"` also clears `has_action` and removes associated todos; changing `priority` syncs to associated todo rows. Categories: `task`, `approval`, `fyi`, `noise`. When `priority` changes, an optional `priority_reason` in `{person_matters, topic_hot, deadline_real, other}` records a priority-override entry that's injected into future analysis prompts (see [Priority override feedback](#priority-override-feedback)). |
 | `POST`  | `/analyses/{item_id}/tag`   | Tag item to a project; triggers background keyword/sender learning                 |
 | `POST`  | `/analyses/{item_id}/noise` | Mark item as irrelevant; triggers background noise keyword learning                |
 
@@ -470,10 +521,14 @@ Situations are cross-source groupings of related analyses identified automatical
 
 | Method   | Path                                  | Description                                                                        |
 |----------|---------------------------------------|------------------------------------------------------------------------------------|
-| `GET`    | `/situations`                         | List situations (params: `project`, `status`, `min_score`). Defaults to `new` + `investigating` + `waiting` statuses, sorted by score descending. Overdue follow-ups surface at the top. |
+| `GET`    | `/situations`                         | List situations (params: `project`, `status`, `min_score`). Defaults to `new` + `investigating` + `waiting` statuses, sorted by score descending. Overdue follow-ups surface at the top. Each response includes a `stale_flag` of `stale_waiting`, `stale_investigating`, or `null`. |
 | `GET`    | `/situations/{id}`                    | Return a single situation with full deserialized analyses in the `items` field     |
 | `POST`   | `/situations/{id}/dismiss`            | Mark situation as dismissed. Optional `{"reason": "..."}` body stores a dismiss reason |
+| `POST`   | `/situations/{id}/undismiss`          | Restore a previously dismissed situation to `new`                                  |
+| `POST`   | `/situations/{id}/transition`         | Transition lifecycle to `{new, investigating, waiting, resolved, dismissed}`. Body: `{"to_status": "...", "note": "...", "follow_up_date": "..."}`. Logs a `situation_events` row. |
 | `POST`   | `/situations/{id}/rescore`            | Manually trigger score recomputation and LLM re-synthesis for a situation          |
+| `POST`   | `/situations/{id}/split`              | Move a subset of items out of the source situation into a new one. Body: `{"item_ids": [...], "new_title": "<optional>"}`. Returns `{"ok": true, "new_situation_id": "...", "original_situation_id": "..."}`. Both situations are lightweight-rescored (no LLM); the source cannot be emptied. |
+| `POST`   | `/situations/{id}/merge`              | Merge another situation into this one. Body: `{"source_situation_id": "..."}`. Source items are relinked to the target and the source is dismissed with `dismiss_reason="merged_into:<target>"`. |
 | `PATCH`  | `/situations/{id}`                    | Update `title`, `status`, `follow_up_date`, `notes`, or `project_tag`. Status changes are logged in `situation_events`. |
 | `GET`    | `/situations/{id}/events`             | Return the status transition history for a situation                               |
 | `POST`   | `/situations/{id}/deep-analysis`      | Submit the situation for extended-context deep analysis via the merLLM background batch queue. Returns `{"ok": true, "job_id": "..."}`. Prompt includes situation title, summary, all item summaries, and open actions. |
@@ -484,6 +539,12 @@ Situations are cross-source groupings of related analyses identified automatical
 | Method | Path                    | Description                                                      |
 |--------|-------------------------|------------------------------------------------------------------|
 | `GET`  | `/batch/status/{job_id}` | Proxy `GET /api/batch/status/{job_id}` to merLLM. Returns the job record or 404. |
+
+### Passdown
+
+| Method | Path                 | Description                                                                                                 |
+|--------|----------------------|-------------------------------------------------------------------------------------------------------------|
+| `POST` | `/passdown/generate` | Assemble a shift-handoff HTML email. Body: `{"hours": <1..168>}`. Returns `{html, sections, generated_at, hours}`. See [Passdown generator](#passdown-generator). |
 
 ### Intel
 

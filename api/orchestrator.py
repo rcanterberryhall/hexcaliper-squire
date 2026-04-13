@@ -512,13 +512,22 @@ def run_reanalyze() -> None:
         _scan_state["total_items"] = len(all_records)
         _scan_state["message"]     = f"Re-analyzing {len(all_records)} items..."
 
-        use_batch = _merllm_batch_available()
-        if use_batch:
-            log.info("reanalyze: merLLM available — routing to batch API")
-            _ensure_batch_poll_thread()
+        # Reanalyze is durable-only (squire#47). Previously a missing merLLM
+        # triggered a sync /api/generate fallback that merLLM does not
+        # persist — a restart mid-run silently dropped items. We now abort
+        # the whole run loudly instead; re-running reanalyze once merLLM is
+        # back up is cheap and preferable to hidden data loss.
+        if not _merllm_batch_available():
+            msg = (
+                "Re-analysis cannot start — merLLM is unreachable. "
+                "Retry once merLLM is back up."
+            )
+            _scan_state["message"] = msg
+            log.error("reanalyze: %s", msg)
+            return
+        log.info("reanalyze: merLLM available — routing to batch API")
+        _ensure_batch_poll_thread()
 
-        results = []
-        _timing: deque = deque(maxlen=_TIMING_WINDOW)
         batch_submitted = 0
         for i, rec in enumerate(all_records):
             if _scan_state["cancelled"]:
@@ -547,42 +556,25 @@ def run_reanalyze() -> None:
                     "hierarchy":   rec.get("hierarchy"),
                 },
             )
-            if use_batch:
-                try:
-                    prompt = build_prompt(item)
-                    job_id = _submit_batch_job(prompt)
-                    if job_id:
-                        with db.lock:
-                            db.set_batch_job_id(rec["item_id"], job_id)
-                        batch_submitted += 1
-                    else:
-                        # Batch submit failed; fall back to direct merLLM call.
-                        # Concurrency against the LLM is owned by merLLM —
-                        # see module docstring (squire#33).  Priority is
-                        # ``background`` so bulk reanalysis cannot starve
-                        # chat or fresh ingest (squire#34).
-                        result = analyze(item, priority="background")
-                        results.append(result)
-                except Exception as e:
-                    log.error("reanalyze batch %s: %s", item.item_id, e)
-            else:
-                try:
-                    _t0 = time.monotonic()
-                    result = analyze(item, priority="background")
-                    _timing.append(time.monotonic() - _t0)
-                    results.append(result)
-                except Exception as e:
-                    log.error("reanalyze %s: %s", item.item_id, e)
-            if _timing:
-                avg_sec = sum(_timing) / len(_timing)
-                remaining = len(all_records) - (i + 1)
-                _scan_state["estimated_minutes_remaining"] = round(avg_sec * remaining / 60, 1)
-
-        actions = sum(1 for r in results if r.has_action)
-        for r in results:
-            _save_analysis(r, reanalyze=True)
-            graph.index_item(r)
-            _spawn_situation_task(r.item_id)
+            try:
+                prompt = build_prompt(item)
+                job_id = _submit_batch_job(prompt)
+                if job_id:
+                    with db.lock:
+                        db.set_batch_job_id(rec["item_id"], job_id)
+                    batch_submitted += 1
+                else:
+                    # Per-item submit failure: log and skip, leaving the item
+                    # in its previous state. squire#47 — we no longer silently
+                    # fall back to the sync /api/generate path (not durable);
+                    # the user can re-run reanalyze later to retry.
+                    log.warning(
+                        "reanalyze %s: batch submit returned no job id; "
+                        "skipping (will be picked up on the next run)",
+                        item.item_id,
+                    )
+            except Exception as e:
+                log.error("reanalyze batch %s: %s", item.item_id, e)
 
         status = "cancelled" if _scan_state["cancelled"] else "success"
         with db.lock:
@@ -590,21 +582,19 @@ def run_reanalyze() -> None:
                 "started_at":    started,
                 "finished_at":   _now_iso(),
                 "sources":       "reanalyze",
-                "items_scanned": len(results),
-                "actions_found": actions,
+                "items_scanned": batch_submitted,
+                "actions_found": 0,   # counted as results stream in from the batch poller
                 "status":        status,
             })
-        if use_batch and batch_submitted:
-            _scan_state["message"] = (
-                f"Re-analysis queued — {batch_submitted} items sent to batch, "
-                f"{len(results)} processed directly. Results apply automatically."
-            )
-        else:
-            _scan_state["message"] = (
-                f"Re-analysis complete — {len(results)} items processed, "
-                f"{actions} action items found. Generating briefing…"
-            )
-        if results:
+        _scan_state["message"] = (
+            f"Re-analysis queued — {batch_submitted} items sent to batch. "
+            f"Results apply automatically as merLLM returns them."
+        )
+        # Kick a briefing regen off the current (pre-batch) stored analyses so
+        # the user gets a fresh summary immediately. The briefing will naturally
+        # refresh again on the next scan/reanalyze as batch results land and
+        # update the underlying analyses.
+        if batch_submitted:
             _generate_briefing_bg()
     except Exception as e:
         _scan_state["message"] = f"Re-analysis error: {e}"

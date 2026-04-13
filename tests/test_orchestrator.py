@@ -190,54 +190,63 @@ def _insert_minimal(item_id, source="jira", priority=None, category=None,
     })
 
 
-def test_run_reanalyze_reprocesses_stored_items():
-    """Items with no existing priority (None) should take the priority from the
-    fresh analysis result after _run_reanalyze."""
+def _apply_fake_batch_result(item_id, payload):
+    """Test helper: invoke the batch-result apply path as if merLLM had
+    returned ``payload``. The reanalyze save-logic tests used to drive this
+    through a mocked ``analyze()`` call in ``_run_reanalyze``, but reanalyze
+    is now batch-only (squire#47) — the save-field logic lives in
+    ``_apply_batch_result`` → ``_save_analysis(reanalyze=True)``.
+    """
+    import json as _json
+    with db.lock:
+        rec = db.get_item(item_id)
+    assert rec is not None
+    with patch("situation_manager._spawn_situation_task"), \
+         patch("orchestrator.graph.index_item"):
+        orchestrator._apply_batch_result(rec, _json.dumps(payload))
+
+
+def test_reanalyze_apply_reprocesses_stored_items():
+    """Items with no existing priority should take the priority from the
+    batch-applied LLM payload."""
     _insert_minimal("r1", priority=None)
     _insert_minimal("r2", priority=None)
 
-    def high_priority_analyze(item, **_kwargs):
-        return _analysis(item.item_id, priority="high")
-
-    with patch("orchestrator.analyze", side_effect=high_priority_analyze), \
-         patch("situation_manager._spawn_situation_task"):
-        _run_reanalyze()
+    payload = {"priority": "high", "category": "fyi"}
+    _apply_fake_batch_result("r1", payload)
+    _apply_fake_batch_result("r2", payload)
 
     assert analyses.get(Q.item_id == "r1")["priority"] == "high"
     assert analyses.get(Q.item_id == "r2")["priority"] == "high"
 
 
-def test_run_reanalyze_preserves_user_edited_fields():
+def test_reanalyze_apply_preserves_user_edited_fields():
     """A field explicitly marked as user-edited must survive reanalysis even
     when the LLM returns a different value.  Non-edited fields should update."""
     import json as _json
     _insert_minimal("u1", priority="high")
-    # Mark priority as user-edited so it persists through reanalysis
     with db.lock:
         db.update_item("u1", {"user_edited_fields": _json.dumps(["priority"])})
 
-    with patch("orchestrator.analyze", return_value=_analysis("u1", priority="low")), \
-         patch("situation_manager._spawn_situation_task"):
-        _run_reanalyze()
+    _apply_fake_batch_result("u1", {"priority": "low", "category": "fyi"})
 
     assert analyses.get(Q.item_id == "u1")["priority"] == "high"
 
 
-def test_run_reanalyze_updates_non_edited_fields():
-    """Fields NOT marked as user-edited should be updated by reanalysis
-    so fresh LLM output (with project awareness) takes effect."""
+def test_reanalyze_apply_updates_non_edited_fields():
+    """Fields NOT marked as user-edited should be updated so fresh LLM output
+    (with project awareness) takes effect."""
     _insert_minimal("u2", priority="low", category="fyi")
 
-    with patch("orchestrator.analyze", return_value=_analysis("u2", priority="high", category="task")), \
-         patch("situation_manager._spawn_situation_task"):
-        _run_reanalyze()
+    _apply_fake_batch_result("u2", {"priority": "high", "category": "task",
+                                     "task_type": "review"})
 
     result = analyses.get(Q.item_id == "u2")
     assert result["priority"] == "high"
     assert result["category"] == "task"
 
 
-def test_run_reanalyze_deletes_stale_todos_before_reinserting():
+def test_reanalyze_apply_deletes_stale_todos_before_reinserting():
     """_save_analysis(reanalyze=True) should remove the old todo and insert a
     new one with the updated description — not accumulate duplicates."""
     import json as _json
@@ -276,17 +285,14 @@ def test_run_reanalyze_deletes_stale_todos_before_reinserting():
         "created_at":  "2026-03-17T10:00:00+00:00",
     })
 
-    new_action = ActionItem(description="new action", deadline=None, owner="me")
-    new_result = Analysis(
-        item_id="t1", source="jira", title="Item t1",
-        author="alice", timestamp="2026-03-17T10:00:00+00:00",
-        url="", has_action=True, priority="medium", category="task",
-        action_items=[new_action], summary="S", urgency_reason=None,
-    )
-
-    with patch("orchestrator.analyze", return_value=new_result), \
-         patch("situation_manager._spawn_situation_task"):
-        _run_reanalyze()
+    _apply_fake_batch_result("t1", {
+        "has_action":   True,
+        "priority":     "medium",
+        "category":     "task",
+        "task_type":    "review",
+        "action_items": [{"description": "new action", "deadline": None, "owner": "me"}],
+        "summary":      "S",
+    })
 
     all_todos = todos.all()
     assert len(all_todos) == 1
@@ -468,20 +474,52 @@ def test_poll_batch_once_uses_shared_helper(monkeypatch):
 
 
 def test_run_reanalyze_sorts_passdowns_first():
-    """Passdown items must appear first in the analysis call order regardless of
+    """Passdown items must appear first in the batch submit order regardless of
     their timestamp."""
     _insert_minimal("n1", timestamp="2026-03-17T10:00:00+00:00", is_passdown=False)
     _insert_minimal("n2", timestamp="2026-03-17T11:00:00+00:00", is_passdown=False)
     _insert_minimal("p1", timestamp="2026-03-17T09:00:00+00:00", is_passdown=True)
 
-    call_order = []
+    submit_order = []
 
-    def recording_analyze(item, **_kwargs):
-        call_order.append(item.item_id)
-        return _analysis(item.item_id)
+    def recording_submit(prompt):
+        # The prompt text contains the item id verbatim since build_prompt
+        # embeds it in the context; record by order of invocation.
+        submit_order.append(len(submit_order))
+        return f"job-{len(submit_order)}"
 
-    with patch("orchestrator.analyze", side_effect=recording_analyze), \
-         patch("situation_manager._spawn_situation_task"):
+    fake_ids = iter(["p1", "n2", "n1"])
+
+    def fake_build_prompt(item):
+        # We rely on build_prompt being called in the same iteration order as
+        # the submit loop, so recording the item here gives us submit order.
+        submit_order.append(item.item_id)
+        return f"prompt for {item.item_id}"
+
+    with patch("orchestrator._merllm_batch_available", return_value=True), \
+         patch("orchestrator._submit_batch_job", return_value="job-x"), \
+         patch("orchestrator.build_prompt", side_effect=fake_build_prompt), \
+         patch("orchestrator._ensure_batch_poll_thread"), \
+         patch("orchestrator._generate_briefing_bg"):
         _run_reanalyze()
 
-    assert call_order[0] == "p1"
+    assert submit_order[0] == "p1"
+
+
+def test_run_reanalyze_aborts_when_merllm_unavailable():
+    """squire#47: if merLLM is unreachable, reanalyze must refuse to run rather
+    than silently falling back to the non-durable /api/generate path."""
+    _insert_minimal("a1")
+    _insert_minimal("a2")
+
+    with patch("orchestrator._merllm_batch_available", return_value=False), \
+         patch("orchestrator._submit_batch_job") as submit, \
+         patch("orchestrator._generate_briefing_bg"):
+        _run_reanalyze()
+
+    submit.assert_not_called()
+    assert "unreachable" in orchestrator._scan_state["message"].lower()
+    # Items must stay untouched (no batch_job_id assigned).
+    for iid in ("a1", "a2"):
+        rec = analyses.get(Q.item_id == iid)
+        assert not rec.get("batch_job_id")

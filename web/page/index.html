@@ -5711,6 +5711,13 @@ function _laWireDragHandlers() {
     el.addEventListener('dragstart', (e) => {
       e.dataTransfer.setData('text/plain', el.dataset.cardId);
       e.dataTransfer.effectAllowed = 'move';
+      // Record where inside the card the user grabbed so we can offset the
+      // drop hit-test by it — otherwise the cursor is at the grab point and
+      // the card ghost appears to the right/left of it, causing the user to
+      // aim at the ghost but the cursor lands on a different day.
+      const r = el.getBoundingClientRect();
+      _LA._dragGrabOffsetX = e.clientX - r.left;
+      console.log('[la-drag] start', { cardId: el.dataset.cardId, grabOffsetX: _LA._dragGrabOffsetX, cardLeft: Math.round(r.left), cardWidth: Math.round(r.width) });
       el.classList.add('dragging');
     });
     el.addEventListener('dragend', () => el.classList.remove('dragging'));
@@ -5722,25 +5729,30 @@ function _laWireDragHandlers() {
   board.addEventListener('drop', async (e) => {
     e.preventDefault();
     const id = e.dataTransfer.getData('text/plain');
-    console.log('[la-drop] fire', { id, x: e.clientX, y: e.clientY });
+    // Shift the hit-test x by the grab offset so we find the cell under the
+    // LEFT edge of the drag ghost (which is what the user visually aims at),
+    // not the cursor itself.
+    const grabOffsetX = _LA._dragGrabOffsetX || 0;
+    const hitX = e.clientX - grabOffsetX;
+    console.log('[la-drop] fire', { id, cursorX: e.clientX, cursorY: e.clientY, grabOffsetX, hitX });
     if (!id) { console.warn('[la-drop] no id in dataTransfer'); return; }
-    // Find the day cell whose on-screen rect actually contains the cursor.
+    // Find the day cell whose on-screen rect actually contains the adjusted x.
     let newStart = null;
     let matchedCell = null;
     const candidates = [];
     for (const cell of board.querySelectorAll('.la-day-cell[data-day-iso]')) {
       const r = cell.getBoundingClientRect();
-      const hitX = e.clientX >= r.left && e.clientX < r.right;
-      const hitY = e.clientY >= r.top  && e.clientY < r.bottom;
-      if (hitX) {
+      const xIn = hitX >= r.left && hitX < r.right;
+      const yIn = e.clientY >= r.top && e.clientY < r.bottom;
+      if (xIn) {
         candidates.push({
           iso: cell.dataset.dayIso,
           left: Math.round(r.left), right: Math.round(r.right),
           top: Math.round(r.top), bottom: Math.round(r.bottom),
-          hitY,
+          yIn,
         });
       }
-      if (hitX && hitY && !newStart) {
+      if (xIn && yIn && !newStart) {
         newStart = cell.dataset.dayIso;
         matchedCell = { iso: cell.dataset.dayIso, left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom) };
       }

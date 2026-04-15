@@ -5722,25 +5722,24 @@ function _laWireDragHandlers() {
   board.addEventListener('drop', async (e) => {
     e.preventDefault();
     const id = e.dataTransfer.getData('text/plain');
-    console.log('[la-drop]', { id, x: e.clientX, y: e.clientY });
-    if (!id) { console.log('[la-drop] no id in dataTransfer'); return; }
-    // elementsFromPoint walks the z-stack, so we can skip over any card that
-    // happens to be under the cursor and land on the day cell beneath it.
-    const stack = document.elementsFromPoint(e.clientX, e.clientY);
-    console.log('[la-drop] stack:', stack.map(n => n.className || n.nodeName));
-    const cell = stack.find(n => n.classList &&
-                                 n.classList.contains('la-day-cell') &&
-                                 !n.classList.contains('overdue-gutter'));
-    if (!cell) { console.log('[la-drop] no cell under cursor'); return; }
-    const dayOffset = Number(cell.dataset.dayOffset);
-    console.log('[la-drop] cell dayOffset =', dayOffset);
-    if (!Number.isFinite(dayOffset)) return;
+    if (!id) return;
+    // Resolve the target day from the ACTUAL bounding rects of the day
+    // cells (elementsFromPoint was returning the wrong cell when cards
+    // covered part of the board).
+    let dayOffset = -1;
+    for (let i = 0; i < 14; i++) {
+      const ref = board.querySelector(`.la-day-cell[data-day-offset="${i}"]`);
+      if (!ref) continue;
+      const r = ref.getBoundingClientRect();
+      if (e.clientX >= r.left && e.clientX < r.right) { dayOffset = i; break; }
+    }
+    if (dayOffset < 0) return;  // dropped in the lane label, overdue gutter, or gap
     const newStart = _laAddDays(_LA.rangeStart, dayOffset);
     const card = _LA.cards.find(c => c.id === id);
-    if (!card) { console.log('[la-drop] card not in _LA.cards', id); return; }
+    if (!card) return;
     const span = _laDayDiff(card.start_date, card.end_date);
     const newEnd = _laAddDays(newStart, Math.max(0, span));
-    console.log('[la-drop] PATCH', { id, newStart, newEnd, wasStart: card.start_date });
+    if (newStart === card.start_date && newEnd === card.end_date) return;
     try {
       await api(`/lookahead/cards/${id}`, 'PATCH',
                 { start_date: newStart, end_date: newEnd });

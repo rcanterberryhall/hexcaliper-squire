@@ -5722,30 +5722,41 @@ function _laWireDragHandlers() {
   board.addEventListener('drop', async (e) => {
     e.preventDefault();
     const id = e.dataTransfer.getData('text/plain');
-    if (!id) return;
-    // Resolve the target day from the ACTUAL bounding rects of the day
-    // cells (elementsFromPoint was returning the wrong cell when cards
-    // covered part of the board).
+    console.log('[la-drop] fire', { id, x: e.clientX, y: e.clientY });
+    if (!id) { console.warn('[la-drop] no id'); return; }
+    const boardRect = board.getBoundingClientRect();
+    console.log('[la-drop] board rect', boardRect);
     let dayOffset = -1;
+    const cellRects = [];
     for (let i = 0; i < 14; i++) {
       const ref = board.querySelector(`.la-day-cell[data-day-offset="${i}"]`);
-      if (!ref) continue;
+      if (!ref) { cellRects.push(null); continue; }
       const r = ref.getBoundingClientRect();
+      cellRects.push({ i, left: r.left, right: r.right, top: r.top, bottom: r.bottom });
       if (e.clientX >= r.left && e.clientX < r.right) { dayOffset = i; break; }
     }
-    if (dayOffset < 0) return;  // dropped in the lane label, overdue gutter, or gap
+    console.log('[la-drop] cell rects', cellRects);
+    console.log('[la-drop] resolved dayOffset =', dayOffset);
+    if (dayOffset < 0) { console.warn('[la-drop] no cell contains cursor X'); return; }
     const newStart = _laAddDays(_LA.rangeStart, dayOffset);
     const card = _LA.cards.find(c => c.id === id);
-    if (!card) return;
+    if (!card) { console.warn('[la-drop] card not found in _LA.cards', id); return; }
     const span = _laDayDiff(card.start_date, card.end_date);
     const newEnd = _laAddDays(newStart, Math.max(0, span));
-    if (newStart === card.start_date && newEnd === card.end_date) return;
+    console.log('[la-drop] plan', { was: card.start_date, newStart, newEnd });
+    if (newStart === card.start_date && newEnd === card.end_date) {
+      console.log('[la-drop] noop — same dates');
+      return;
+    }
     try {
-      await api(`/lookahead/cards/${id}`, 'PATCH',
-                { start_date: newStart, end_date: newEnd });
+      const resp = await api(`/lookahead/cards/${id}`, 'PATCH',
+                             { start_date: newStart, end_date: newEnd });
+      console.log('[la-drop] PATCH ok', { start_date: resp.start_date, end_date: resp.end_date });
       await _laLoadData();
+      console.log('[la-drop] after reload card =',
+                  (_LA.cards.find(c => c.id === id) || {}).start_date);
       renderLookahead();
-    } catch(err) { alert('Reschedule failed: ' + err.message); }
+    } catch(err) { console.error('[la-drop] PATCH failed', err); alert('Reschedule failed: ' + err.message); }
   });
 }
 

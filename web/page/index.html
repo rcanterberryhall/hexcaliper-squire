@@ -5500,6 +5500,43 @@ function _laBarStyle(card, gridRow) {
   return `grid-column: ${startCol} / ${endCol}${rowStyle}`;
 }
 
+function _laCardColRange(card) {
+  // Inclusive column span this card occupies, matching _laBarStyle's math.
+  const today = _LA.rangeStart;
+  const overdue = card.end_date < today && card.status !== 'done';
+  if (overdue) return { start: 2, end: 2 };
+  let start = card.start_date < today ? today : card.start_date;
+  let end   = card.end_date   > _LA.rangeEnd ? _LA.rangeEnd : card.end_date;
+  const startCol = 3 + _laDayDiff(today, start);
+  const endCol   = 3 + _laDayDiff(today, end);
+  return { start: startCol, end: endCol };
+}
+
+function _laPackLane(cards) {
+  // Greedy interval-packing: assign each card to the lowest sub-row whose
+  // previously placed cards don't overlap its column range.
+  const items = cards.map((c, i) => ({ i, r: _laCardColRange(c) }));
+  items.sort((a, b) => a.r.start - b.r.start || a.r.end - b.r.end);
+  const subrowEnds = [];
+  const assigned = new Array(cards.length);
+  for (const it of items) {
+    let placed = false;
+    for (let s = 0; s < subrowEnds.length; s++) {
+      if (subrowEnds[s] < it.r.start) {
+        subrowEnds[s] = it.r.end;
+        assigned[it.i] = s;
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      assigned[it.i] = subrowEnds.length;
+      subrowEnds.push(it.r.end);
+    }
+  }
+  return { assigned, subrowCount: Math.max(1, subrowEnds.length) };
+}
+
 function _laShiftChip(card) {
   const s = _LA.shifts[card.start_shift_num];
   if (s && s.label) {
@@ -5542,19 +5579,26 @@ function _laRenderProjectBoard() {
   }
 
   let body = '';
-  lanes.forEach((lane, laneIdx) => {
-    // Row 1 is the header; each lane occupies the next row.
-    const row = 2 + laneIdx;
-    body += `<div class="la-lane-label" title="${esc(lane)}" style="grid-row:${row}">${esc(lane)}</div>`;
-    body += `<div class="la-day-cell overdue-gutter" style="grid-row:${row}"></div>`;
+  // Row 1 is the header; each lane occupies one or more sub-rows below so
+  // overlapping cards don't stack on top of one another.
+  let rowCursor = 2;
+  lanes.forEach((lane) => {
+    const laneCards = byLane.get(lane);
+    const { assigned, subrowCount } = _laPackLane(laneCards);
+    const startRow = rowCursor;
+    const endRow   = rowCursor + subrowCount; // grid-row end is exclusive
+    const span = `grid-row:${startRow} / ${endRow}`;
+    body += `<div class="la-lane-label" title="${esc(lane)}" style="${span}">${esc(lane)}</div>`;
+    body += `<div class="la-day-cell overdue-gutter" style="${span}"></div>`;
     for (let i = 0; i < 14; i++) {
       const iso = _laAddDays(_LA.rangeStart, i);
       const cls = iso === todayISO ? 'la-day-cell today' : 'la-day-cell';
-      body += `<div class="${cls}" style="grid-row:${row}"></div>`;
+      body += `<div class="${cls}" style="${span}"></div>`;
     }
-    for (const card of byLane.get(lane)) {
-      body += _laRenderCardBar(card, row);
-    }
+    laneCards.forEach((card, idx) => {
+      body += _laRenderCardBar(card, startRow + assigned[idx]);
+    });
+    rowCursor = endRow;
   });
 
   if (!cards.length) {

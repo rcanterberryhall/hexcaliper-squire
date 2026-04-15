@@ -5718,6 +5718,23 @@ function _laWireDragHandlers() {
       const r = el.getBoundingClientRect();
       _LA._dragGrabOffsetX = e.clientX - r.left;
       console.log('[la-drag] start', { cardId: el.dataset.cardId, grabOffsetX: _LA._dragGrabOffsetX, cardLeft: Math.round(r.left), cardWidth: Math.round(r.width) });
+      // Dump every day-cell's iso and x-range so we can see whether the
+      // day-cells the drop handler sees line up with where this card is.
+      const boards = document.querySelectorAll('.la-board');
+      console.log('[la-drag] boards found:', boards.length);
+      boards.forEach((b, bi) => {
+        const br = b.getBoundingClientRect();
+        console.log(`[la-drag] board[${bi}] classes="${b.className}" left=${Math.round(br.left)} right=${Math.round(br.right)} scrollLeft=${b.scrollLeft} parent.scrollLeft=${b.parentElement && b.parentElement.scrollLeft}`);
+        const cells = b.querySelectorAll('.la-day-cell[data-day-iso]');
+        const rows = {};
+        cells.forEach(c => {
+          const cr = c.getBoundingClientRect();
+          const key = cr.top;
+          rows[key] = rows[key] || [];
+          rows[key].push(`${c.dataset.dayIso}@${Math.round(cr.left)}-${Math.round(cr.right)}`);
+        });
+        Object.keys(rows).slice(0, 2).forEach(k => console.log(`[la-drag]   row top=${Math.round(k)}:`, rows[k].join(' | ')));
+      });
       el.classList.add('dragging');
     });
     el.addEventListener('dragend', () => el.classList.remove('dragging'));

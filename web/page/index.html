@@ -1129,6 +1129,23 @@ tr.attn-low  { opacity:0.65; }
 }
 .la-overview-bar.highlight { background:var(--accent); color:var(--bg); font-weight:600; }
 .la-overview-bar.conflict  { background:rgba(230,80,80,.35); color:var(--red); }
+.la-legend {
+  display:flex; gap:14px; align-items:center; flex-wrap:wrap;
+  padding:4px 14px; font-size:10px; color:var(--muted);
+  border-bottom:1px solid var(--border2);
+}
+.la-legend-item { display:flex; align-items:center; gap:4px; }
+.la-legend-swatch {
+  width:12px; height:12px; border-radius:2px; border:1px solid var(--border2);
+  flex-shrink:0;
+}
+.la-legend-swatch.sw-planned    { border-left:3px solid var(--muted); }
+.la-legend-swatch.sw-progress   { border-left:3px solid var(--blue); }
+.la-legend-swatch.sw-done       { border-left:3px solid var(--green); opacity:.55; }
+.la-legend-swatch.sw-blocked    { border-left:3px solid var(--red); }
+.la-legend-swatch.sw-today      { background:rgba(212,160,23,.07); }
+.la-legend-swatch.sw-overdue    { background:rgba(230,80,80,.05); border-right:2px solid var(--red); }
+.la-legend-swatch.sw-bom        { background:rgba(230,80,80,.15); }
 
 /* Resource editor dialog */
 .la-modal { background:var(--surface); border:1px solid var(--border2);
@@ -1372,6 +1389,16 @@ tr.attn-low  { opacity:0.65; }
           <button class="ia" onclick="openShiftsModal()"       style="padding:3px 9px;font-size:11px">⚙ Shifts</button>
           <button class="ia" onclick="openTemplatesModal()"    style="padding:3px 9px;font-size:11px">Templates</button>
           <button class="ia" onclick="_laAnnotateProjectBulk()" style="padding:3px 9px;font-size:11px" title="Ask the LLM to find cross-system connections for every card in the window">✨ Annotate</button>
+        </div>
+        <div class="la-legend">
+          <span style="text-transform:uppercase;letter-spacing:.1em">Legend:</span>
+          <span class="la-legend-item"><span class="la-legend-swatch sw-planned"></span> Planned</span>
+          <span class="la-legend-item"><span class="la-legend-swatch sw-progress"></span> In Progress</span>
+          <span class="la-legend-item"><span class="la-legend-swatch sw-done"></span> Done</span>
+          <span class="la-legend-item"><span class="la-legend-swatch sw-blocked"></span> Blocked</span>
+          <span class="la-legend-item"><span class="la-legend-swatch sw-today"></span> Today</span>
+          <span class="la-legend-item"><span class="la-legend-swatch sw-overdue"></span> Overdue</span>
+          <span class="la-legend-item"><span class="la-legend-swatch sw-bom"></span> Missing Resources</span>
         </div>
         <div class="la-board-wrap" id="laBoardWrap">
           <div class="la-empty">Loading look-ahead…</div>

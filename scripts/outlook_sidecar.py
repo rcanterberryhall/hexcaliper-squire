@@ -307,6 +307,28 @@ def fetch(lookback_hours: int = LOOKBACK_HOURS, max_emails: int = MAX_EMAILS) ->
 _POST_BATCH = 50   # items per /ingest request — keeps payloads well under nginx limits
 
 
+def _exit_on_http_error(exc: "requests.HTTPError") -> None:
+    """
+    Turn an opaque ``HTTPError`` into an actionable exit message.
+
+    Cloudflare Access returns 401/403 when the service-token Client ID or
+    Secret is wrong or missing. The bare ``requests`` exception text only
+    says ``401 Client Error: Unauthorized for url: ...`` — easy to
+    misread as an API bug. Trap those two codes explicitly and point the
+    operator at ``--setup``. Anything else exits with the underlying
+    message (still more informative than the old generic handler).
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in (401, 403):
+        sys.exit(
+            f"ERROR: Cloudflare Access rejected the request ({status}).\n"
+            "Your stored CF-Access-Client-Id / Client-Secret is wrong, "
+            "expired, or missing a policy binding.\n"
+            "Run: python outlook_sidecar.py --setup to update credentials."
+        )
+    sys.exit(f"ERROR: HTTP {status or '??'} from API — {exc}")
+
+
 def post(items: list[dict], client_id: str, client_secret: str) -> None:
     """
     POST fetched email items to the Squire ``/ingest`` endpoint in batches.
@@ -350,6 +372,8 @@ def post(items: list[dict], client_id: str, client_secret: str) -> None:
                   f"skipped {result.get('skipped','?')}", flush=True)
         except requests.ConnectionError:
             sys.exit(f"ERROR: Could not reach API at {PAGE_API_URL} — is the appliance reachable?")
+        except requests.HTTPError as e:
+            _exit_on_http_error(e)
         except Exception as e:
             sys.exit(f"ERROR: {e}")
 
@@ -424,6 +448,8 @@ def _seed_and_infer() -> None:
         r.raise_for_status()
     except requests.ConnectionError:
         sys.exit(f"ERROR: Could not reach API at {PAGE_API_URL} — is the appliance reachable?")
+    except requests.HTTPError as e:
+        _exit_on_http_error(e)
     except Exception as e:
         sys.exit(f"ERROR starting seed state machine: {e}")
 

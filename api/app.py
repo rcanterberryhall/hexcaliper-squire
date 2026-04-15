@@ -1518,14 +1518,18 @@ def ingest(body: IngestRequest, background_tasks: BackgroundTasks):
     :return: ``{"received": N, "skipped": M}``
     :rtype: dict
     """
+    candidate_ids = [i.get("item_id", "") for i in body.items]
+    # claim_ingest_items dedups against both persisted rows and items still
+    # being processed from an earlier /ingest call (parsival#58).
+    fresh_ids = orchestrator.claim_ingest_items(candidate_ids)
+
     raw: list[RawItem] = []
+    seen: set[str] = set()
     for i in body.items:
         iid = i.get("item_id", "")
-        if not iid:
+        if iid not in fresh_ids or iid in seen:
             continue
-        with db.lock:
-            if db.get_item(iid):
-                continue   # already processed
+        seen.add(iid)
         raw.append(RawItem(
             source    = i.get("source", "outlook"),
             item_id   = iid,

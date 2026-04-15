@@ -68,6 +68,32 @@ def test_ingest_deduplicates_already_processed(client):
     assert r.json()["received"] == 1
 
 
+def test_ingest_deduplicates_in_flight_items(client):
+    """parsival#58: a second /ingest call issued before the first's background
+    task finishes must not re-queue items that are still being processed."""
+    import orchestrator
+    # Simulate a slow / not-yet-run background task by patching
+    # process_ingest_items to be a no-op. claim_ingest_items still runs in
+    # the request handler, so the first call's ids are in _in_flight_ids
+    # when the second call arrives.
+    with patch("orchestrator.process_ingest_items"):
+        r1 = client.post("/ingest", json={"items": [_item("a"), _item("b")]})
+        r2 = client.post("/ingest", json={"items": [_item("a"), _item("c")]})
+
+    assert r1.json() == {"received": 2, "skipped": 0}
+    assert r2.json() == {"received": 1, "skipped": 1}
+    # Manually release so we don't leak state across tests (conftest also clears).
+    orchestrator._in_flight_ids.clear()
+
+
+def test_ingest_deduplicates_within_single_batch(client):
+    """A batch containing the same item_id twice must only queue it once."""
+    with patch("orchestrator.process_ingest_items"):
+        r = client.post("/ingest", json={"items": [_item("x"), _item("x")]})
+
+    assert r.json() == {"received": 1, "skipped": 1}
+
+
 # ── /todos ────────────────────────────────────────────────────────────────────
 
 def _insert_todo(**kwargs):

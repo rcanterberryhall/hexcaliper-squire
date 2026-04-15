@@ -317,6 +317,58 @@ def test_post_exits_on_connection_error():
             sidecar.post([{"item_id": "E1"}], "cid", "csec")
 
 
+def test_post_exits_with_credential_message_on_401():
+    """parsival#57: bad CF credentials surface a clear, actionable message
+    (not the opaque `401 Client Error` from requests)."""
+    import requests as req
+    sidecar = _sidecar()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 401
+    mock_resp.raise_for_status.side_effect = req.HTTPError(
+        "401 Client Error: Unauthorized", response=mock_resp
+    )
+    with patch("outlook_sidecar.requests.post", return_value=mock_resp):
+        with pytest.raises(SystemExit) as exc_info:
+            sidecar.post([{"item_id": "E1"}], "bad-id", "bad-secret")
+
+    msg = str(exc_info.value)
+    assert "Cloudflare Access" in msg
+    assert "--setup" in msg
+
+
+def test_post_exits_with_credential_message_on_403():
+    import requests as req
+    sidecar = _sidecar()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 403
+    mock_resp.raise_for_status.side_effect = req.HTTPError(
+        "403 Client Error: Forbidden", response=mock_resp
+    )
+    with patch("outlook_sidecar.requests.post", return_value=mock_resp):
+        with pytest.raises(SystemExit) as exc_info:
+            sidecar.post([{"item_id": "E1"}], "cid", "csec")
+
+    assert "Cloudflare Access" in str(exc_info.value)
+
+
+def test_post_exits_with_plain_http_message_on_500():
+    """Non-auth HTTP errors still exit with a useful message (not swallowed)."""
+    import requests as req
+    sidecar = _sidecar()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 500
+    mock_resp.raise_for_status.side_effect = req.HTTPError(
+        "500 Server Error", response=mock_resp
+    )
+    with patch("outlook_sidecar.requests.post", return_value=mock_resp):
+        with pytest.raises(SystemExit) as exc_info:
+            sidecar.post([{"item_id": "E1"}], "cid", "csec")
+
+    msg = str(exc_info.value)
+    assert "500" in msg
+    assert "Cloudflare Access" not in msg
+
+
 def test_post_prints_received_and_skipped_counts(capsys):
     sidecar = _sidecar()
     items   = [{"item_id": "E1"}, {"item_id": "E2"}]

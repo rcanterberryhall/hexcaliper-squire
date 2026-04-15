@@ -68,6 +68,13 @@ _save_analysis              = None
 _spawn_situation_task       = None
 _generate_briefing          = None
 
+# Item IDs accepted by /ingest but not yet persisted by process_ingest_items.
+# Consulted alongside db.get_item so a sidecar re-run before the background
+# task completes does not re-queue the same items (parsival#58). In-memory
+# only: on restart we lose the set, but lost items then reappear via the
+# sidecar's normal lookback window, which is the correct behaviour.
+_in_flight_ids: set[str] = set()
+
 
 def init(scan_state: dict, save_analysis_fn, spawn_situation_fn,
          generate_briefing_fn=None) -> None:
@@ -610,6 +617,40 @@ def run_reanalyze() -> None:
         _scan_state["estimated_minutes_remaining"] = 0
 
 
+def claim_ingest_items(item_ids: list[str]) -> set[str]:
+    """
+    Atomically mark ``item_ids`` as in-flight and return the subset that is
+    genuinely new (not already in the DB and not currently being processed).
+
+    Used by ``POST /ingest`` to deduplicate against both persisted items
+    *and* items queued by a previous call whose background task has not yet
+    finished (parsival#58). Caller is expected to pass the claimed ids to
+    ``process_ingest_items`` so they eventually leave the set via
+    ``release_ingest_item``.
+
+    :param item_ids: Candidate item IDs from the incoming ingest batch.
+    :return: Subset of ``item_ids`` newly claimed for processing.
+    """
+    claimed: set[str] = set()
+    with db.lock:
+        for iid in item_ids:
+            if not iid:
+                continue
+            if iid in _in_flight_ids:
+                continue
+            if db.get_item(iid):
+                continue
+            _in_flight_ids.add(iid)
+            claimed.add(iid)
+    return claimed
+
+
+def release_ingest_item(item_id: str) -> None:
+    """Remove ``item_id`` from the in-flight set after processing settles."""
+    with db.lock:
+        _in_flight_ids.discard(item_id)
+
+
 def process_ingest_items(raw: list[RawItem]) -> None:
     """
     Analyse a pre-filtered list of new raw items from the ingest endpoint.
@@ -623,10 +664,14 @@ def process_ingest_items(raw: list[RawItem]) -> None:
     noise_rules = _get_noise_rules()
     with db.lock:
         _scan_state["ingest_pending"] += len(raw)
-    for item in raw:
+    for idx, item in enumerate(raw):
         if _scan_state["cancelled"]:
             with db.lock:
                 _scan_state["ingest_pending"] = 0
+                # Clear the claim on every still-queued id so a future
+                # ingest call can re-queue them after cancellation.
+                for remaining in raw[idx:]:
+                    _in_flight_ids.discard(remaining.item_id)
             log.info("ingest cancelled — stopping after current item")
             return
         matched, rule_type = _nf.should_filter(item, noise_rules)
@@ -634,6 +679,7 @@ def process_ingest_items(raw: list[RawItem]) -> None:
             _save_filtered_item(item, rule_type)
             with db.lock:
                 _scan_state["ingest_pending"] = max(0, _scan_state["ingest_pending"] - 1)
+                _in_flight_ids.discard(item.item_id)
             continue
         try:
             result = analyze(item, priority="short")
@@ -644,6 +690,7 @@ def process_ingest_items(raw: list[RawItem]) -> None:
             log.error("ingest %s: %s", item.item_id, e)
         with db.lock:
             _scan_state["ingest_pending"] = max(0, _scan_state["ingest_pending"] - 1)
+            _in_flight_ids.discard(item.item_id)
 
 
 # ── Auto-scan scheduler ────────────────────────────────────────────────────────

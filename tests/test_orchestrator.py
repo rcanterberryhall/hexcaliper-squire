@@ -506,6 +506,83 @@ def test_run_reanalyze_sorts_passdowns_first():
     assert submit_order[0] == "p1"
 
 
+# ── claim_ingest_items (parsival#58) ──────────────────────────────────────────
+
+def test_claim_ingest_items_returns_all_fresh_ids_on_first_call():
+    claimed = orchestrator.claim_ingest_items(["a", "b", "c"])
+    assert claimed == {"a", "b", "c"}
+
+
+def test_claim_ingest_items_skips_ids_already_in_flight():
+    """Second /ingest call before the first's background task finishes must
+    not re-claim ids still being processed (parsival#58)."""
+    orchestrator.claim_ingest_items(["a", "b"])
+    claimed = orchestrator.claim_ingest_items(["a", "c"])
+    assert claimed == {"c"}
+
+
+def test_claim_ingest_items_skips_persisted_ids():
+    analyses.insert({"item_id": "already-done", "source": "outlook"})
+    claimed = orchestrator.claim_ingest_items(["already-done", "new"])
+    assert claimed == {"new"}
+
+
+def test_claim_ingest_items_skips_empty_ids():
+    claimed = orchestrator.claim_ingest_items(["", "x"])
+    assert claimed == {"x"}
+
+
+def test_release_ingest_item_allows_reclaim():
+    orchestrator.claim_ingest_items(["a"])
+    orchestrator.release_ingest_item("a")
+    claimed = orchestrator.claim_ingest_items(["a"])
+    assert claimed == {"a"}
+
+
+def test_process_ingest_items_releases_claim_on_success():
+    orchestrator.claim_ingest_items(["x1"])
+    with patch("orchestrator.analyze", return_value=_analysis("x1")), \
+         patch("orchestrator._save_analysis"), \
+         patch("orchestrator.graph.index_item"), \
+         patch("orchestrator._spawn_situation_task"):
+        orchestrator.process_ingest_items([_raw(item_id="x1")])
+
+    assert "x1" not in orchestrator._in_flight_ids
+
+
+def test_process_ingest_items_releases_claim_on_analyze_exception():
+    orchestrator.claim_ingest_items(["boom"])
+    with patch("orchestrator.analyze", side_effect=RuntimeError("boom")), \
+         patch("orchestrator._spawn_situation_task"):
+        orchestrator.process_ingest_items([_raw(item_id="boom")])
+
+    assert "boom" not in orchestrator._in_flight_ids
+
+
+def test_process_ingest_items_releases_remaining_claims_on_cancel():
+    """If cancellation fires mid-loop, unprocessed ids must leave the
+    in-flight set so a future /ingest call can re-queue them."""
+    orchestrator.claim_ingest_items(["x1", "x2", "x3"])
+
+    def cancelling_analyze(item, **_kwargs):
+        scan_state["cancelled"] = True
+        return _analysis(item.item_id)
+
+    try:
+        with patch("orchestrator.analyze", side_effect=cancelling_analyze), \
+             patch("orchestrator._save_analysis"), \
+             patch("orchestrator.graph.index_item"), \
+             patch("orchestrator._spawn_situation_task"):
+            orchestrator.process_ingest_items([
+                _raw(item_id="x1"),
+                _raw(item_id="x2"),
+                _raw(item_id="x3"),
+            ])
+        assert orchestrator._in_flight_ids == set()
+    finally:
+        scan_state["cancelled"] = False
+
+
 def test_run_reanalyze_aborts_when_merllm_unavailable():
     """squire#47: if merLLM is unreachable, reanalyze must refuse to run rather
     than silently falling back to the non-durable /api/generate path."""

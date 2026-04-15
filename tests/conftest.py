@@ -42,6 +42,7 @@ def clear_db():
     config.PROJECTS = []
     config.FOCUS_TOPICS = []
     config.NOISE_KEYWORDS = []
+    orchestrator._in_flight_ids.clear()
     seeder._seed_job = {"status": "idle"}
     # Prevent orchestrator from calling the real LLM briefing builder in tests.
     with patch.object(orchestrator, "_generate_briefing", None):

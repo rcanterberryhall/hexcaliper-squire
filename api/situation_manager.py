@@ -616,6 +616,9 @@ def _situation_response(sit: dict) -> dict:
     item_ids = sit.get("item_ids", [])
     with db.lock:
         items_raw = [db.get_item(iid) for iid in item_ids]
+        all_todos = []
+        for iid in item_ids:
+            all_todos.extend(db.get_todos_for_item(iid))
     items = [
         {
             "item_id":   r.get("item_id"),
@@ -626,6 +629,10 @@ def _situation_response(sit: dict) -> dict:
         }
         for r in items_raw if r
     ]
+    done_keys = {
+        (t["item_id"], t["description"])
+        for t in all_todos if t.get("done")
+    }
     from datetime import datetime, timezone
     follow_up_date   = sit.get("follow_up_date")
     follow_up_overdue = False
@@ -646,7 +653,10 @@ def _situation_response(sit: dict) -> dict:
         "priority":        sit.get("priority"),
         "sources":         sit.get("sources", []),
         "project_tag":     sit.get("project_tag"),
-        "open_actions":    sit.get("open_actions", []),
+        "open_actions":    [
+            {**a, "done": (a.get("source_item_id"), a.get("description")) in done_keys}
+            for a in sit.get("open_actions", [])
+        ],
         "references":      sit.get("references", []),
         "key_context":     sit.get("key_context"),
         "last_updated":    sit.get("last_updated"),

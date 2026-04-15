@@ -611,6 +611,11 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .status-waiting        { background: rgba(255,176,32,.08);  color: var(--amber); border: 1px solid rgba(255,176,32,.2); }
 .status-needs_decision { background: rgba(212,160,23,.1);   color: var(--gold);  border: 1px solid rgba(212,160,23,.25); }
 .status-informational  { background: rgba(110,80,80,.1);    color: var(--muted); border: 1px solid var(--border); }
+.sit-actions-list { margin-top: 4px; }
+.sit-action-item { font-size: 10px; color: var(--accent); padding: 1px 0; line-height: 1.4; }
+.sit-action-item::before { content: '⚡ '; }
+.sit-action-item.done { text-decoration: line-through; color: var(--muted); }
+.sit-action-item.done::before { content: '✓ '; }
 .stat-situations { grid-column: 1 / -1; }
 .stat-intel      { grid-column: 1 / -1; }
 .attention-cold-banner { font-size:11px; color:var(--muted); background:rgba(110,80,80,.08); border:1px solid var(--border); border-radius:var(--r); padding:6px 12px; margin-bottom:10px; }
@@ -1654,6 +1659,7 @@ tr.attn-low  { opacity:0.65; }
         <dt>Status workflow</dt><dd><strong>new</strong> → <strong>investigating</strong> → <strong>waiting</strong> (with optional follow-up date) → <strong>resolved</strong> or <strong>dismissed</strong>. Use the status dropdown on each situation card.</dd>
         <dt>Follow-up date</dt><dd>Set a date when the situation needs attention next. Situations in "waiting" status past their follow-up date surface at the top of the list with a visual indicator.</dd>
         <dt>Score</dt><dd>Composite urgency — higher means more attention needed now.</dd>
+        <dt>Action items</dt><dd>Each situation card lists your action items inline. Completed items appear with a strikethrough and checkmark so you can see progress at a glance.</dd>
         <dt>Default filter</dt><dd>The list shows <strong>new</strong>, <strong>investigating</strong>, and <strong>waiting</strong> situations by default. Toggle to see resolved/dismissed.</dd>
         <dt>Transition log</dt><dd>Every status change is logged with timestamp and optional note.</dd>
       </dl>
@@ -3024,7 +3030,9 @@ function situationCard(s) {
   const statusLabel = `<span class="sit-detail-status status-${s.status||'informational'}">${(s.status||'informational').replace('_',' ')}</span>`;
   const actions     = (s.open_actions||[]).filter(a => a.owner === 'me' || a.owner === 'Me');
   const actLine     = actions.length
-    ? `<span style="font-size:10px;color:var(--accent)">⚡ ${actions.length} action${actions.length!==1?'s':''} for you</span>`
+    ? `<div class="sit-actions-list">${actions.map(a =>
+        `<div class="sit-action-item${a.done?' done':''}">${esc(a.description)}</div>`
+      ).join('')}</div>`
     : '';
   const evidenceRows = (s.items||[]).map(i =>
     `<div class="sit-evidence-item" onclick="event.stopPropagation();openItemDetail('${esc(i.item_id)}')">

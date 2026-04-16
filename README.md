@@ -470,6 +470,8 @@ Both sidecars POST to `/page/api/ingest`. The API deduplicates by message ID so 
 
 A two-week planning view that sits alongside todos, situations, and intel. Each project gets its own 14-day board; a global overview rolls up every project sorted by the earliest card start. Cards are UUID-keyed, carry a status (`planned`, `in_progress`, `done`, `blocked`), optional assignee, start/end date + shift, and three kinds of relations:
 
+A color legend below the toolbar explains the visual encoding: card status is shown as a colored left border (gray = planned, blue = in progress, green = done, red = blocked), today's column has an amber tint, overdue cards sit in a red-bordered gutter, and missing-resource chips use a red highlight.
+
 - **Dependencies** — other look-ahead cards that must finish first
 - **Links** — cross-system references to `todo`, `situation`, or `key_date` targets
 - **Resources (BOM)** — entries from the global resource catalog with a per-card status of `needed` / `secured` / `consumed`

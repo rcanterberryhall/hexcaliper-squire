@@ -3430,9 +3430,12 @@ def _card_input(body: dict, *, require_all: bool = False) -> dict:
     """Validate and normalise a card create/update payload."""
     allowed = ("title", "project", "assignee", "start_date", "start_shift_num",
                "end_date", "end_shift_num", "status", "notes",
+               "work_days",
                "linked_procedure_doc",
                "template_instance_id", "template_task_local_id")
     data = {k: body[k] for k in allowed if k in body}
+    if "work_days" in data:
+        data["work_days"] = (data["work_days"] or "").strip()
 
     if require_all:
         missing = [k for k in ("title", "project", "start_date", "end_date") if not data.get(k)]

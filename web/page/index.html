@@ -1126,6 +1126,20 @@ tr.attn-low  { opacity:0.65; }
   white-space:normal; word-break:break-word;
 }
 .la-card .la-card-meta { font-size:10px; color:var(--muted); display:flex; gap:6px; flex-wrap:wrap; }
+.la-card .la-card-workweek {
+  position:absolute; inset:0; display:grid; pointer-events:none;
+  border-radius:var(--r); overflow:hidden; z-index:0;
+}
+.la-card .la-card-workweek > div { background:transparent; }
+.la-card .la-card-workweek > div.off {
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(255,255,255,.08) 0 4px,
+    rgba(0,0,0,.25)       4px 8px
+  );
+  opacity:.7;
+}
+.la-card > *:not(.la-card-workweek) { position:relative; z-index:1; }
 .la-card .la-chip { padding:0 5px; border-radius:3px; background:var(--bg); font-size:9px; letter-spacing:.04em; }
 .la-card .la-chip.bom-missing { background:rgba(230,80,80,.15); color:var(--red); }
 .la-card .la-chip.multi-shift { background:rgba(64,184,255,.12); color:var(--blue); }
@@ -1721,6 +1735,17 @@ tr.attn-low  { opacity:0.65; }
         <dt>On complete</dt><dd>Marking the todo done flips the card to <strong>done</strong>; marking the card done flips the todo closed. Re-opening the todo returns the card to <strong>planned</strong>.</dd>
         <dt>On delete</dt><dd>Deleting the card deletes the todo. Deleting the todo leaves the card in place and clears the link.</dd>
         <dt>Backfill</dt><dd>On first start after upgrade, existing cards have todos created for them once per database.</dd>
+      </dl>
+    </div>
+
+    <div class="help-section">
+      <h3>Workweek per task</h3>
+      <p>Each card (and each template task) carries an optional <code>work_days</code> mask so Mon-Thu crews, Sun-Wed shifts, and Mon-Fri office work can coexist on the same board. The mask uses the same format as shift schedules — <code>M,T,W,Th,F,Sa,Su</code>.</p>
+      <dl class="help-kv">
+        <dt>Picker</dt><dd>The card editor and template-task row offer presets (7-day, Mon-Fri, Mon-Thu, Sun-Wed) plus a "Custom…" option that prompts for a raw mask.</dd>
+        <dt>Empty mask</dt><dd>Leaving the mask blank means "no restriction" — the template's <code>duration_unit</code> takes over (<strong>business_days</strong> falls back to Mon-Fri, <strong>calendar_days</strong> to all seven).</dd>
+        <dt>Date math</dt><dd>When the mask is set and covers fewer than 7 days, instantiation offsets and duration skip DOWs outside the mask. Reschedule shifts each card by its own work-day count inside the (old-anchor, new-anchor] window, so mixed-workweek instances stay aligned per-task.</dd>
+        <dt>Rendering</dt><dd>Card bars show a diagonal-hatch overlay on DOW cells outside the mask; the bar stays continuous so the span reads as "skipped through" rather than split.</dd>
       </dl>
     </div>
 
@@ -5414,6 +5439,109 @@ function _laFmtDayHead(iso) {
   return { dow, num: d };
 }
 
+// Work-day mask helpers (parsival#73). Matches the backend mask format used
+// in project_shifts.days and the new card/template-task work_days column:
+// comma-separated DOW tokens M,T,W,Th,F,Sa,Su. Empty = all seven days on.
+const _LA_DOW_TOKENS = ['Su','M','T','W','Th','F','Sa']; // index = getDay()
+const _LA_WEEK_PRESETS = [
+  { key: 'all',       label: '7 days (all)', mask: '' },
+  { key: 'mon_fri',   label: 'Mon–Fri',      mask: 'M,T,W,Th,F' },
+  { key: 'mon_thu',   label: 'Mon–Thu',      mask: 'M,T,W,Th' },
+  { key: 'sun_wed',   label: 'Sun–Wed',      mask: 'Su,M,T,W' },
+  { key: 'sun_thu',   label: 'Sun–Thu',      mask: 'Su,M,T,W,Th' },
+];
+function _laParseMask(mask) {
+  const set = new Set();
+  (mask || '').split(',').forEach(tok => {
+    const t = tok.trim();
+    const idx = _LA_DOW_TOKENS.indexOf(t);
+    if (idx >= 0) set.add(idx);
+  });
+  return set;
+}
+function _laIsoDow(iso) {
+  const [y,m,d] = iso.split('-').map(Number);
+  return new Date(y, m-1, d).getDay();
+}
+function _laIsWorkDow(dow, mask) {
+  if (!mask) return true;
+  return _laParseMask(mask).has(dow);
+}
+function _laIsWorkIso(iso, mask) {
+  if (!mask) return true;
+  return _laIsWorkDow(_laIsoDow(iso), mask);
+}
+function _laMaskKey(mask) {
+  const norm = (mask || '').trim();
+  const preset = _LA_WEEK_PRESETS.find(p => p.mask === norm);
+  return preset ? preset.key : (norm ? 'custom' : 'all');
+}
+function _laMaskFormatShort(mask) {
+  if (!mask) return '7 days';
+  const preset = _LA_WEEK_PRESETS.find(p => p.mask === mask);
+  if (preset) return preset.label;
+  return mask.replace(/,/g, ' ');
+}
+function _laReadWorkDaysFromEditor(prefix) {
+  // Returns the mask currently encoded by the editor widget with the given
+  // id prefix (e.g. 'laCard'). Empty string = all seven days.
+  const presetEl = document.getElementById(prefix + 'WorkPreset');
+  if (!presetEl) return '';
+  const key = presetEl.value;
+  if (key === 'all') return '';
+  if (key === 'custom') {
+    const toks = [];
+    _LA_DOW_TOKENS.forEach((tok, i) => {
+      const cb = document.getElementById(prefix + 'WorkDow' + i);
+      if (cb && cb.checked) toks.push(tok);
+    });
+    // All-7 custom collapses to empty (unrestricted).
+    return toks.length === 7 ? '' : toks.join(',');
+  }
+  const preset = _LA_WEEK_PRESETS.find(p => p.key === key);
+  return preset ? preset.mask : '';
+}
+function _laOnWorkPresetChange(prefix) {
+  const presetEl = document.getElementById(prefix + 'WorkPreset');
+  const custom   = document.getElementById(prefix + 'WorkCustom');
+  if (!presetEl || !custom) return;
+  const key = presetEl.value;
+  if (key === 'custom') {
+    custom.style.display = 'flex';
+  } else {
+    custom.style.display = 'none';
+    const mask = (_LA_WEEK_PRESETS.find(p => p.key === key) || {mask:''}).mask;
+    const set = _laParseMask(mask);
+    _LA_DOW_TOKENS.forEach((_, i) => {
+      const cb = document.getElementById(prefix + 'WorkDow' + i);
+      if (cb) cb.checked = mask ? set.has(i) : true;
+    });
+  }
+}
+function _laWorkPickerHtml(prefix, currentMask) {
+  const key = _laMaskKey(currentMask);
+  const set = _laParseMask(currentMask);
+  const presetOpts = _LA_WEEK_PRESETS.map(p =>
+    `<option value="${p.key}" ${p.key === key ? 'selected' : ''}>${p.label}</option>`
+  ).join('') + `<option value="custom" ${key === 'custom' ? 'selected' : ''}>Custom…</option>`;
+  const dowOrder = [1,2,3,4,5,6,0]; // display Mon…Sun but keep getDay() indices
+  const dowLabels = {0:'Sun',1:'Mon',2:'Tue',3:'Wed',4:'Thu',5:'Fri',6:'Sat'};
+  const boxes = dowOrder.map(i => {
+    const checked = currentMask ? set.has(i) : true;
+    return `<label style="display:inline-flex;align-items:center;gap:3px;font-size:11px">
+      <input type="checkbox" id="${prefix}WorkDow${i}" ${checked ? 'checked' : ''}> ${dowLabels[i]}
+    </label>`;
+  }).join('');
+  return `
+    <div class="la-field" style="max-width:220px">
+      <label title="Which days of the week this task is active. Off-days render as a diagonal-hatch overlay on the board.">Work week</label>
+      <select id="${prefix}WorkPreset" onchange="_laOnWorkPresetChange('${prefix}')">${presetOpts}</select>
+    </div>
+    <div class="la-field" id="${prefix}WorkCustom" style="flex:2;display:${key === 'custom' ? 'flex' : 'none'};flex-wrap:wrap;gap:10px;align-items:center">
+      ${boxes}
+    </div>`;
+}
+
 function _laFmtRangeLabel(startIso, endIso) {
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const [sy,sm,sd] = startIso.split('-').map(Number);
@@ -5733,17 +5861,41 @@ function _laRenderCardBar(card, gridRow) {
   const userLinks = (card.links || []).filter(l => l.type !== 'todo');
   return `<div class="la-card ${esc(statusCls)}" style="${_laBarStyle(card, gridRow)}" data-card-id="${esc(card.id)}" draggable="true"
               onclick="editLookaheadCard('${esc(card.id)}')">
+    ${_laWorkweekOverlay(card)}
     <div class="la-card-title">${esc(card.title)}</div>
     ${notes ? `<div class="la-card-notes" title="${esc(notes)}">${esc(notes)}</div>` : ''}
     <div class="la-card-meta">
       ${card.assignee ? `<span>${esc(card.assignee)}</span>` : ''}
       ${_laShiftChip(card)}
       ${_laBomChip(card)}
+      ${card.work_days ? `<span class="la-chip" title="Work week: ${esc(_laMaskFormatShort(card.work_days))}" style="color:var(--muted)">📅 ${esc(_laMaskFormatShort(card.work_days))}</span>` : ''}
       ${card.status === 'blocked' ? '<span class="la-chip" style="color:var(--red)">blocked</span>' : ''}
       ${card.linked_procedure_doc ? '<span class="la-chip" title="Has linked procedure doc" style="color:var(--blue)">📄</span>' : ''}
       ${userLinks.length ? `<span class="la-chip" title="${userLinks.length} linked item${userLinks.length===1?'':'s'}" style="color:var(--accent)">🔗 ${userLinks.length}</span>` : ''}
     </div>
   </div>`;
+}
+
+function _laWorkweekOverlay(card) {
+  // Diagonal-hatch overlay on off-days within the card's visible span
+  // (parsival#73). Rendered as one absolutely-positioned grid cell per day,
+  // so off-days get a hatched background while on-days stay transparent.
+  const mask = (card.work_days || '').trim();
+  if (!mask) return '';
+  const today   = _LA.rangeStart;
+  const endIso  = _LA.rangeEnd;
+  if (card.end_date < today && card.status !== 'done') return ''; // overdue gutter
+  let spanStart = card.start_date < today  ? today  : card.start_date;
+  let spanEnd   = card.end_date   > endIso ? endIso : card.end_date;
+  const days = _laDayDiff(spanStart, spanEnd) + 1;
+  if (days < 1) return '';
+  let cells = '';
+  for (let i = 0; i < days; i++) {
+    const iso = _laAddDays(spanStart, i);
+    const off = !_laIsWorkIso(iso, mask);
+    cells += `<div class="${off ? 'off' : ''}"></div>`;
+  }
+  return `<div class="la-card-workweek" style="grid-template-columns:repeat(${days},1fr)">${cells}</div>`;
 }
 
 function _laRenderMobileProject(cards) {
@@ -5993,6 +6145,9 @@ function _laShowCardModal(card) {
         <input id="laCardNotes" type="text" value="${esc(card.notes||'')}">
       </div>
     </div>
+    <div class="la-field-row">
+      ${_laWorkPickerHtml('laCard', card.work_days || '')}
+    </div>
 
     <div class="la-field">
       <label>Resources / BOM</label>
@@ -6137,6 +6292,7 @@ async function _laSaveCard() {
     end_shift_num:   Number($('laCardEndShift').value),
     status:          $('laCardStatus').value,
     notes:           $('laCardNotes').value,
+    work_days:       _laReadWorkDaysFromEditor('laCard'),
     linked_procedure_doc: ($('laCardProcDoc') ? $('laCardProcDoc').value.trim() : ''),
     depends_on:      card.depends_on || [],
     links:           card.links      || [],
@@ -6413,6 +6569,7 @@ function _laRenderTemplateEditor() {
       <td style="padding:4px 6px"><input type="number" value="${task.offset_start_shift || 1}" min="1" max="3" oninput="_laTplEditField(${i},'offset_start_shift',parseInt(this.value||1))" style="width:40px;padding:2px 4px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:11px"></td>
       <td style="padding:4px 6px"><input type="number" value="${task.duration_shifts || 1}" min="1" oninput="_laTplEditField(${i},'duration_shifts',parseInt(this.value||1))" style="width:40px;padding:2px 4px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:11px"></td>
       <td style="padding:4px 6px"><input type="text" value="${esc((task.depends_on||[]).join(','))}" oninput="_laTplEditDeps(${i},this.value)" placeholder="A,B" style="width:70px;padding:2px 4px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:11px"></td>
+      <td style="padding:4px 6px">${_laTplWorkDaysCell(i, task)}</td>
       <td style="padding:4px 6px">${_laRenderTaskResources(i, task)}</td>
       <td style="padding:4px 6px"><input type="text" value="${esc(task.linked_procedure_doc || '')}" oninput="_laTplEditField(${i},'linked_procedure_doc',this.value)" placeholder="procedure URL" style="width:120px;padding:2px 4px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:11px"></td>
       <td style="padding:4px 6px"><button class="ia" style="padding:1px 6px;font-size:10px;color:var(--red)" onclick="_laTplRemoveTask(${i})">✕</button></td>
@@ -6441,10 +6598,11 @@ function _laRenderTemplateEditor() {
         <th style="padding:4px 6px" title="starting shift (1/2/3)">Shift</th>
         <th style="padding:4px 6px" title="duration in shifts">Len</th>
         <th style="padding:4px 6px" title="comma-separated local_ids">Deps</th>
+        <th style="padding:4px 6px" title="which days of the week this task is active">Work</th>
         <th style="padding:4px 6px">Resources</th>
         <th style="padding:4px 6px">Procedure</th><th></th>
       </tr></thead>
-      <tbody>${taskRows || '<tr><td colspan="9" style="padding:8px;color:var(--muted);text-align:center;font-size:11px">No tasks yet.</td></tr>'}</tbody>
+      <tbody>${taskRows || '<tr><td colspan="10" style="padding:8px;color:var(--muted);text-align:center;font-size:11px">No tasks yet.</td></tr>'}</tbody>
     </table>
     <div style="margin-top:10px;display:flex;gap:8px">
       <button class="ia" onclick="_laTplAddTask()" style="padding:4px 10px;font-size:11px">+ Add task</button>
@@ -6472,6 +6630,40 @@ function _laTplEditField(idx, field, value) {
   _LA.editingTemplate.tasks[idx][field] = value;
 }
 
+function _laTplWorkDaysCell(idx, task) {
+  const mask = (task.work_days || '').trim();
+  const key = _laMaskKey(mask);
+  const presets = _LA_WEEK_PRESETS.map(p =>
+    `<option value="${p.key}" ${p.key === key ? 'selected' : ''}>${p.label}</option>`
+  ).join('') + `<option value="custom" ${key === 'custom' ? 'selected' : ''}>Custom…${mask ? ' (' + esc(mask) + ')' : ''}</option>`;
+  return `<select onchange="_laTplEditWorkPreset(${idx}, this.value)"
+            title="${mask ? 'mask: ' + esc(mask) : 'all seven days'}"
+            style="padding:2px 4px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:11px;max-width:110px">
+    ${presets}
+  </select>`;
+}
+
+function _laTplEditWorkPreset(idx, key) {
+  if (key === 'custom') {
+    const existing = _LA.editingTemplate.tasks[idx].work_days || '';
+    const input = window.prompt(
+      'Work-week mask (comma-separated from M,T,W,Th,F,Sa,Su; blank = all 7 days):',
+      existing
+    );
+    if (input === null) { _laRenderTemplateEditor(); return; }
+    const cleaned = input
+      .split(',')
+      .map(s => s.trim())
+      .filter(t => _LA_DOW_TOKENS.includes(t))
+      .join(',');
+    _LA.editingTemplate.tasks[idx].work_days = cleaned;
+  } else {
+    const preset = _LA_WEEK_PRESETS.find(p => p.key === key);
+    _LA.editingTemplate.tasks[idx].work_days = preset ? preset.mask : '';
+  }
+  _laRenderTemplateEditor();
+}
+
 function _laTplEditDeps(idx, csv) {
   _LA.editingTemplate.tasks[idx].depends_on = csv.split(',').map(s => s.trim()).filter(Boolean);
 }
@@ -6482,6 +6674,7 @@ function _laTplAddTask() {
   tasks.push({
     local_id: nextId, title: '', offset_start_days: 0,
     offset_start_shift: 1, duration_shifts: 1, depends_on: [], resource_requirements: [],
+    work_days: '',
   });
   _laRenderTemplateEditor();
 }

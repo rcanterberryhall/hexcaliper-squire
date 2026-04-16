@@ -173,6 +173,16 @@ def _migrate_schema(c: sqlite3.Connection) -> None:
     card_cols = {row[1] for row in c.execute("PRAGMA table_info(lookahead_cards)").fetchall()}
     if "linked_procedure_doc" not in card_cols:
         c.execute("ALTER TABLE lookahead_cards ADD COLUMN linked_procedure_doc TEXT NOT NULL DEFAULT ''")
+    # Per-card workweek mask (parsival#73). Empty string = all seven days active
+    # (default). Non-empty mask uses the same comma-separated DOW format as
+    # project_shifts.days (e.g. "M,T,W,Th,F" for a Mon-Fri work week). Drives
+    # both board rendering (off-days get a diagonal-hatch overlay) and
+    # instantiation/reschedule math (offsets count only work days).
+    if "work_days" not in card_cols:
+        c.execute("ALTER TABLE lookahead_cards ADD COLUMN work_days TEXT NOT NULL DEFAULT ''")
+    tpl_task_cols = {row[1] for row in c.execute("PRAGMA table_info(lookahead_template_tasks)").fetchall()}
+    if tpl_task_cols and "work_days" not in tpl_task_cols:
+        c.execute("ALTER TABLE lookahead_template_tasks ADD COLUMN work_days TEXT NOT NULL DEFAULT ''")
 
     # Suggestions pool for cross-system LLM linking (parsival#50).  Rows
     # start pending and become concrete card_links once the user accepts.
@@ -477,6 +487,8 @@ def _create_schema(c: sqlite3.Connection) -> None:
         end_shift_num          INTEGER NOT NULL DEFAULT 1,
         status                 TEXT    NOT NULL DEFAULT 'planned',
         notes                  TEXT    NOT NULL DEFAULT '',
+        work_days              TEXT    NOT NULL DEFAULT '',
+        linked_procedure_doc   TEXT    NOT NULL DEFAULT '',
         template_instance_id   TEXT,
         template_task_local_id TEXT,
         created_at             TEXT    NOT NULL DEFAULT '',
@@ -573,6 +585,7 @@ def _create_schema(c: sqlite3.Connection) -> None:
         offset_start_shift   INTEGER NOT NULL DEFAULT 1,
         duration_shifts      INTEGER NOT NULL DEFAULT 1,
         shift_preference     INTEGER NOT NULL DEFAULT 0,
+        work_days            TEXT    NOT NULL DEFAULT '',
         linked_procedure_doc TEXT    NOT NULL DEFAULT '',
         PRIMARY KEY (template_id, local_id),
         FOREIGN KEY (template_id) REFERENCES lookahead_templates(id) ON DELETE CASCADE
@@ -2029,14 +2042,15 @@ def _write_template_tasks(template_id: str, tasks: list[dict]) -> None:
         c.execute(
             "INSERT INTO lookahead_template_tasks "
             "(template_id, local_id, title, offset_start_days, offset_start_shift, "
-            " duration_shifts, shift_preference, linked_procedure_doc) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " duration_shifts, shift_preference, work_days, linked_procedure_doc) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (template_id, local_id,
              (t.get("title") or "").strip(),
              int(t.get("offset_start_days", 0)),
              int(t.get("offset_start_shift", 1)),
              max(1, int(t.get("duration_shifts", 1))),
              int(t.get("shift_preference", 0)),
+             (t.get("work_days") or "").strip(),
              (t.get("linked_procedure_doc") or "").strip()),
         )
         for dep in t.get("depends_on") or []:
@@ -2120,17 +2134,61 @@ def delete_template(template_id: str) -> None:
 
 # ── Template instantiation ────────────────────────────────────────────────────
 
-def _add_days(date_str: str, n: int, unit: str) -> str:
-    """Add N days of the given unit to an ISO date string. Business days skip Sat/Sun."""
+# DOW tokens match project_shifts.days format: "M,T,W,Th,F,Sa,Su".
+# Python's date.weekday(): 0=Mon ... 6=Sun.
+_DOW_TOKEN_TO_WEEKDAY = {"M": 0, "T": 1, "W": 2, "Th": 3, "F": 4, "Sa": 5, "Su": 6}
+_WORKWEEK_BUSINESS    = frozenset({0, 1, 2, 3, 4})  # Mon-Fri
+
+
+def _parse_work_days(mask: str) -> frozenset[int]:
+    """Parse a comma-separated DOW mask into a set of Python weekday ints.
+
+    Empty / whitespace-only / ``None`` returns an empty set meaning "all seven
+    days are work days" (caller must treat empty as unrestricted).
+    """
+    if not mask:
+        return frozenset()
+    out: set[int] = set()
+    for tok in mask.split(","):
+        tok = tok.strip()
+        if tok in _DOW_TOKEN_TO_WEEKDAY:
+            out.add(_DOW_TOKEN_TO_WEEKDAY[tok])
+    return frozenset(out)
+
+
+def _resolve_workweek(unit: str, work_days: str) -> frozenset[int]:
+    """Return the effective work-day set for a (unit, work_days) pair.
+
+    Precedence:
+      - non-empty ``work_days`` mask wins (per-task/card override from #73).
+      - otherwise ``unit == 'business_days'`` falls back to Mon-Fri.
+      - else an empty set, meaning "all seven days" (no restriction).
+    """
+    mask = _parse_work_days(work_days)
+    if mask:
+        return mask
+    if unit == "business_days":
+        return _WORKWEEK_BUSINESS
+    return frozenset()
+
+
+def _add_days(date_str: str, n: int, unit: str, work_days: str = "") -> str:
+    """Add N days to an ISO date string under the given workweek.
+
+    When the resolved workweek is non-empty and not all seven days, N counts
+    only work days (weekends or other off-days are skipped).
+    """
     from datetime import date, timedelta
     y, m, d = (int(x) for x in date_str.split("-"))
     cur = date(y, m, d)
-    if unit == "business_days":
+    wd = _resolve_workweek(unit, work_days)
+    restricted = bool(wd) and len(wd) < 7
+    if restricted:
         step = 1 if n >= 0 else -1
         remaining = abs(n)
         while remaining > 0:
             cur = cur + timedelta(days=step)
-            if cur.weekday() < 5:  # 0..4 = Mon..Fri
+            if cur.weekday() in wd:
                 remaining -= 1
     else:
         cur = cur + timedelta(days=n)
@@ -2138,7 +2196,7 @@ def _add_days(date_str: str, n: int, unit: str) -> str:
 
 
 def _duration_to_end(start_date: str, start_shift: int, duration_shifts: int,
-                     unit: str) -> tuple[str, int]:
+                     unit: str, work_days: str = "") -> tuple[str, int]:
     """Convert a (start_date, start_shift, duration) triple into (end_date, end_shift)."""
     total_shifts = max(1, int(duration_shifts))
     # Each day holds up to 3 shifts.  Shifts past 3 wrap to the next day.
@@ -2147,7 +2205,7 @@ def _duration_to_end(start_date: str, start_shift: int, duration_shifts: int,
     while end_shift > 3:
         end_shift -= 3
         days_added += 1
-    end_date = _add_days(start_date, days_added, unit) if days_added else start_date
+    end_date = _add_days(start_date, days_added, unit, work_days) if days_added else start_date
     return end_date, end_shift
 
 
@@ -2175,18 +2233,23 @@ def instantiate_template(template_id: str, start_date: str,
     for task in tpl["tasks"]:
         card_id = str(_uuid.uuid4())
         local_to_card[task["local_id"]] = card_id
-        s_date  = _add_days(start_date, int(task["offset_start_days"]), unit)
+        # Per-task work_days mask (parsival#73) overrides the template's
+        # duration_unit for this task's date math and propagates to the card.
+        task_wd = (task.get("work_days") or "").strip()
+        s_date  = _add_days(start_date, int(task["offset_start_days"]), unit, task_wd)
         s_shift = int(task["offset_start_shift"]) or 1
         e_date, e_shift = _duration_to_end(
-            s_date, s_shift, int(task["duration_shifts"]), unit)
+            s_date, s_shift, int(task["duration_shifts"]), unit, task_wd)
         c.execute(
             "INSERT INTO lookahead_cards "
             "(id, title, project, assignee, start_date, start_shift_num, "
-            " end_date, end_shift_num, status, notes, linked_procedure_doc, "
-            " template_instance_id, template_task_local_id, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', '', ?, ?, ?, ?, ?)",
+            " end_date, end_shift_num, status, notes, work_days, "
+            " linked_procedure_doc, template_instance_id, template_task_local_id, "
+            " created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', '', ?, ?, ?, ?, ?, ?)",
             (card_id, task["title"], project, "",
              s_date, s_shift, e_date, e_shift,
+             task_wd,
              task.get("linked_procedure_doc", ""),
              instance_id, task["local_id"], now, now),
         )
@@ -2298,25 +2361,36 @@ def reschedule_instance(instance_id: str, new_start_date: str) -> Optional[dict]
     delta_calendar = (_as_date(new_start_date) - _as_date(old_start)).days
     if delta_calendar == 0:
         return get_instance(instance_id)
-    # For business-days templates, translate calendar delta into business-day
-    # delta by counting weekdays between the two dates.  Same sign as delta.
-    if unit == "business_days":
-        a, b = sorted([_as_date(old_start), _as_date(new_start_date)])
-        bdays = 0
-        from datetime import timedelta
+    # Count work-days between the two instance anchors, once per distinct
+    # effective workweek that any card in the instance uses. Cards with an
+    # empty/all-7-days workweek shift by calendar delta; restricted workweeks
+    # shift by their own work-day count so relative spacing stays intact.
+    from datetime import timedelta
+    a, b = sorted([_as_date(old_start), _as_date(new_start_date)])
+
+    def _count_work_days(wd: frozenset[int]) -> int:
+        if not wd or len(wd) >= 7:
+            return delta_calendar
+        n = 0
         cur = a
         while cur < b:
             cur += timedelta(days=1)
-            if cur.weekday() < 5:
-                bdays += 1
-        delta = bdays if delta_calendar > 0 else -bdays
-    else:
-        delta = delta_calendar
+            if cur.weekday() in wd:
+                n += 1
+        return n if delta_calendar > 0 else -n
+
     now = _now_iso()
     cards = list_lookahead_cards_for_instance(instance_id)
+    workweek_cache: dict[frozenset[int], int] = {}
     for card in cards:
-        new_s = _add_days(card["start_date"], delta, unit)
-        new_e = _add_days(card["end_date"], delta, unit)
+        wd = _resolve_workweek(unit, card.get("work_days") or "")
+        if wd not in workweek_cache:
+            workweek_cache[wd] = _count_work_days(wd)
+        card_delta = workweek_cache[wd]
+        card_unit  = "business_days" if (wd and len(wd) < 7) else unit
+        card_wd    = card.get("work_days") or ""
+        new_s = _add_days(card["start_date"], card_delta, card_unit, card_wd)
+        new_e = _add_days(card["end_date"],   card_delta, card_unit, card_wd)
         c.execute(
             "UPDATE lookahead_cards SET start_date = ?, end_date = ?, updated_at = ? "
             "WHERE id = ?",
@@ -2371,18 +2445,21 @@ def upgrade_instance(instance_id: str) -> Optional[dict]:
     local_to_card_id: dict[str, str] = {}
     for task in tpl["tasks"]:
         local_id = task["local_id"]
-        s_date  = _add_days(start_date, int(task["offset_start_days"]), unit)
+        task_wd = (task.get("work_days") or "").strip()
+        s_date  = _add_days(start_date, int(task["offset_start_days"]), unit, task_wd)
         s_shift = int(task["offset_start_shift"]) or 1
         e_date, e_shift = _duration_to_end(
-            s_date, s_shift, int(task["duration_shifts"]), unit)
+            s_date, s_shift, int(task["duration_shifts"]), unit, task_wd)
         existing_card = card_by_local.get(local_id)
         if existing_card:
             cid = existing_card["id"]
             c.execute(
                 "UPDATE lookahead_cards SET title = ?, start_date = ?, "
                 "start_shift_num = ?, end_date = ?, end_shift_num = ?, "
-                "linked_procedure_doc = ?, updated_at = ? WHERE id = ?",
+                "work_days = ?, linked_procedure_doc = ?, updated_at = ? "
+                "WHERE id = ?",
                 (task["title"], s_date, s_shift, e_date, e_shift,
+                 task_wd,
                  task.get("linked_procedure_doc", ""), now, cid),
             )
         else:
@@ -2390,12 +2467,13 @@ def upgrade_instance(instance_id: str) -> Optional[dict]:
             c.execute(
                 "INSERT INTO lookahead_cards "
                 "(id, title, project, assignee, start_date, start_shift_num, "
-                " end_date, end_shift_num, status, notes, linked_procedure_doc, "
-                " template_instance_id, template_task_local_id, "
+                " end_date, end_shift_num, status, notes, work_days, "
+                " linked_procedure_doc, template_instance_id, template_task_local_id, "
                 " created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', '', ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', '', ?, ?, ?, ?, ?, ?)",
                 (cid, task["title"], project, "",
                  s_date, s_shift, e_date, e_shift,
+                 task_wd,
                  task.get("linked_procedure_doc", ""),
                  instance_id, local_id, now, now),
             )

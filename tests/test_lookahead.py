@@ -360,6 +360,107 @@ def test_instantiate_business_days_skips_weekends(client):
     assert inst["cards"][0]["start_date"] == "2026-05-07"
 
 
+# ── Per-task work_days mask (parsival#73) ────────────────────────────────────
+
+def test_card_work_days_round_trips(client):
+    _wipe_lookahead()
+    card = client.post("/lookahead/cards", json=_card_payload(
+        work_days="M,T,W,Th,F")).json()
+    assert card["work_days"] == "M,T,W,Th,F"
+    fetched = client.get(f"/lookahead/cards/{card['id']}").json()
+    assert fetched["work_days"] == "M,T,W,Th,F"
+    # PATCH to a new mask persists.
+    client.patch(f"/lookahead/cards/{card['id']}", json={"work_days": "Su,M,T,W"})
+    assert client.get(f"/lookahead/cards/{card['id']}").json()["work_days"] == "Su,M,T,W"
+    # Empty string clears it (all 7 days).
+    client.patch(f"/lookahead/cards/{card['id']}", json={"work_days": ""})
+    assert client.get(f"/lookahead/cards/{card['id']}").json()["work_days"] == ""
+
+
+def test_instantiate_per_task_work_days_overrides_unit(client):
+    _wipe_lookahead()
+    # Template runs on calendar_days, but task X restricts to Mon-Thu.
+    body = _template_payload(duration_unit="calendar_days",
+                             tasks=[{"local_id": "x", "title": "X",
+                                     "offset_start_days": 4, "duration_shifts": 1,
+                                     "work_days": "M,T,W,Th"}])
+    tpl = client.post("/lookahead/templates", json=body).json()
+    # 2026-05-04 Mon → +4 Mon-Thu days → Mon May 4 (cur), Tue, Wed, Thu, Mon May 11.
+    inst = client.post(f"/lookahead/templates/{tpl['id']}/instantiate",
+                       json={"start_date": "2026-05-04",
+                             "project_tag": "P905"}).json()
+    card = inst["cards"][0]
+    assert card["start_date"] == "2026-05-11"
+    assert card["work_days"] == "M,T,W,Th"
+
+
+def test_instantiate_sunday_wednesday_workweek(client):
+    _wipe_lookahead()
+    # Sun-Wed shift crew: +3 work-days from Sun → Sun, Mon, Tue, Wed.
+    body = _template_payload(duration_unit="calendar_days",
+                             tasks=[{"local_id": "x", "title": "X",
+                                     "offset_start_days": 3, "duration_shifts": 1,
+                                     "work_days": "Su,M,T,W"}])
+    tpl = client.post("/lookahead/templates", json=body).json()
+    # 2026-05-03 is a Sunday → +3 Sun-Wed days → 2026-05-06 (Wed).
+    inst = client.post(f"/lookahead/templates/{tpl['id']}/instantiate",
+                       json={"start_date": "2026-05-03",
+                             "project_tag": "P905"}).json()
+    assert inst["cards"][0]["start_date"] == "2026-05-06"
+
+
+def test_reschedule_honors_per_card_work_days(client):
+    _wipe_lookahead()
+    # Two tasks, different workweeks: one unrestricted, one Mon-Fri.
+    body = _template_payload(duration_unit="calendar_days", tasks=[
+        {"local_id": "A", "title": "Any day",
+         "offset_start_days": 0, "duration_shifts": 1},
+        {"local_id": "B", "title": "Weekdays only",
+         "offset_start_days": 0, "duration_shifts": 1,
+         "work_days": "M,T,W,Th,F"},
+    ])
+    tpl = client.post("/lookahead/templates", json=body).json()
+    # Start 2026-05-04 Mon; both cards land on Mon.
+    inst = client.post(f"/lookahead/templates/{tpl['id']}/instantiate",
+                       json={"start_date": "2026-05-04",
+                             "project_tag": "P905"}).json()
+    by_local = {c["template_task_local_id"]: c for c in inst["cards"]}
+    assert by_local["A"]["start_date"] == "2026-05-04"
+    assert by_local["B"]["start_date"] == "2026-05-04"
+    # Reschedule by +6 calendar days to 2026-05-10 (Sun).
+    rescheduled = client.patch(f"/lookahead/instances/{inst['id']}",
+                               json={"start_date": "2026-05-10"}).json()
+    by_local = {c["template_task_local_id"]: c for c in rescheduled["cards"]}
+    # Unrestricted card follows calendar delta → Sun 2026-05-10.
+    assert by_local["A"]["start_date"] == "2026-05-10"
+    # Mon-Fri card counts its own work-days in the (Mon 05-04, Sun 05-10]
+    # window — Tue/Wed/Thu/Fri = 4 — so Mon + 4 business days → Fri 2026-05-08.
+    assert by_local["B"]["start_date"] == "2026-05-08"
+
+
+def test_upgrade_instance_propagates_work_days(client):
+    _wipe_lookahead()
+    tpl = client.post("/lookahead/templates", json=_template_payload()).json()
+    inst = client.post(f"/lookahead/templates/{tpl['id']}/instantiate",
+                       json={"start_date": "2026-05-04",
+                             "project_tag": "P905"}).json()
+    card_a = [c for c in inst["cards"] if c["template_task_local_id"] == "A"][0]
+    assert card_a["work_days"] == ""
+    # Template author adds a work_days mask to A.
+    client.patch(f"/lookahead/templates/{tpl['id']}", json={"tasks": [
+        {"local_id": "A", "title": "Pre-check",
+         "offset_start_days": 0, "offset_start_shift": 1, "duration_shifts": 1,
+         "work_days": "M,T,W,Th,F"},
+        {"local_id": "B", "title": "Main inspection",
+         "offset_start_days": 2, "offset_start_shift": 1, "duration_shifts": 2,
+         "depends_on": ["A"]},
+    ]})
+    upgraded = client.post(f"/lookahead/instances/{inst['id']}/upgrade").json()
+    by_local = {c["template_task_local_id"]: c for c in upgraded["cards"]}
+    assert by_local["A"]["work_days"] == "M,T,W,Th,F"
+    assert by_local["B"]["work_days"] == ""
+
+
 def test_instantiate_copies_named_resources_to_bom(client):
     _wipe_lookahead()
     crane = client.post("/lookahead/resources",

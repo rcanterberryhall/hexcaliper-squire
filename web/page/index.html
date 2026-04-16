@@ -1708,6 +1708,17 @@ tr.attn-low  { opacity:0.65; }
     </div>
 
     <div class="help-section">
+      <h3>Look-ahead ↔ todos</h3>
+      <p>Every look-ahead card is mirrored by a linked action item so the two surfaces stay in sync.</p>
+      <dl class="help-kv">
+        <dt>On create</dt><dd>Creating a card inserts a manual todo with <code>source=lookahead</code>, deadline = card end date, owner = card assignee, project_tag = card project.</dd>
+        <dt>On complete</dt><dd>Marking the todo done flips the card to <strong>done</strong>; marking the card done flips the todo closed. Re-opening the todo returns the card to <strong>planned</strong>.</dd>
+        <dt>On delete</dt><dd>Deleting the card deletes the todo. Deleting the todo leaves the card in place and clears the link.</dd>
+        <dt>Backfill</dt><dd>On first start after upgrade, existing cards have todos created for them once per database.</dd>
+      </dl>
+    </div>
+
+    <div class="help-section">
       <h3>Projects</h3>
       <p>Projects are named workstreams the LLM uses to tag and group items. Configure them in Settings.</p>
       <dl class="help-kv">

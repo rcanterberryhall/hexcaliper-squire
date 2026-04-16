@@ -1762,19 +1762,77 @@ def set_card_dependencies(card_id: str, depends_on_ids: list[str]) -> None:
 
 
 def set_card_links(card_id: str, links: list[dict]) -> None:
-    """Replace the link set on a card. ``links`` is [{type, id}, ...]."""
+    """Replace the user-editable link set on a card. ``links`` is [{type, id}, ...].
+
+    The ``todo`` link type is auto-managed (one todo per card, created on card
+    insert, kept in sync by app endpoints) and is preserved across this call
+    even if not present in ``links``.
+    """
     c = conn()
-    c.execute("DELETE FROM lookahead_card_links WHERE card_id = ?", (card_id,))
+    c.execute(
+        "DELETE FROM lookahead_card_links WHERE card_id = ? AND link_type != 'todo'",
+        (card_id,),
+    )
     for link in links or []:
         lt = link.get("type")
         tid = link.get("id")
-        if lt not in _LINK_TYPES or not tid:
+        if lt not in _LINK_TYPES or lt == "todo" or not tid:
             continue
         c.execute(
             "INSERT OR IGNORE INTO lookahead_card_links (card_id, link_type, target_id) "
             "VALUES (?, ?, ?)",
             (card_id, lt, str(tid)),
         )
+
+
+def get_card_todo_id(card_id: str) -> Optional[int]:
+    """Return the integer todo id linked to this card, or None."""
+    row = conn().execute(
+        "SELECT target_id FROM lookahead_card_links "
+        "WHERE card_id = ? AND link_type = 'todo' LIMIT 1",
+        (card_id,),
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def get_cards_for_todo(todo_id: int) -> list[str]:
+    """Return card ids linked to a todo (usually zero or one)."""
+    rows = conn().execute(
+        "SELECT card_id FROM lookahead_card_links "
+        "WHERE link_type = 'todo' AND target_id = ?",
+        (str(todo_id),),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def set_card_todo_link(card_id: str, todo_id: int) -> None:
+    """Replace the card's todo link with a single pointer to ``todo_id``."""
+    c = conn()
+    c.execute(
+        "DELETE FROM lookahead_card_links WHERE card_id = ? AND link_type = 'todo'",
+        (card_id,),
+    )
+    c.execute(
+        "INSERT OR IGNORE INTO lookahead_card_links (card_id, link_type, target_id) "
+        "VALUES (?, 'todo', ?)",
+        (card_id, str(int(todo_id))),
+    )
+
+
+def list_cards_without_todo() -> list[dict]:
+    """Return all cards that have no linked todo."""
+    rows = conn().execute(
+        "SELECT c.* FROM lookahead_cards c "
+        "LEFT JOIN lookahead_card_links l "
+        "  ON l.card_id = c.id AND l.link_type = 'todo' "
+        "WHERE l.card_id IS NULL"
+    ).fetchall()
+    return _rows_to_list(rows)
 
 
 def set_card_resources(card_id: str, entries: list[dict]) -> None:

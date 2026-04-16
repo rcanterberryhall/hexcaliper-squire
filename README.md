@@ -486,6 +486,8 @@ In the card editor, the assignee input autocompletes from both prior card assign
 
 The board is mobile-friendly — on narrow screens the 14-day grid collapses to a vertical day-list so the view works on foldables.
 
+Every card is mirrored by a linked action item (todo). Creating a card inserts a matching manual todo (`source=lookahead`, deadline = card end date, owner = card assignee, project_tag = card project); deleting the card deletes the todo. Marking either side done flips the other: closing the todo sets the card to `done`, closing the card sets the todo to `done`, and re-opening the todo flips the card back to `planned`. On first start after upgrade the server back-fills todos for every pre-existing card (once per database, guarded by a `model_state` marker).
+
 ### Templates
 
 Repeatable work can be saved as a **template**: a small graph of tasks with relative offsets, optional dependencies, and resource requirements. Templates live in the "Templates" button on the look-ahead toolbar.

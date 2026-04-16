@@ -690,7 +690,8 @@ def test_reject_suggestion_does_not_create_link(client):
     sugg = client.get(f"/lookahead/cards/{card['id']}/suggestions").json()[0]
     client.post(f"/lookahead/suggestions/{sugg['id']}/reject")
     refreshed = client.get(f"/lookahead/cards/{card['id']}").json()
-    assert refreshed["links"] == []
+    user_links = [l for l in refreshed["links"] if l["type"] != "todo"]
+    assert user_links == []
 
 
 def test_annotate_project_fans_out_across_cards(client):
@@ -719,3 +720,114 @@ def test_delete_instance_cascades_attached_cards(client):
     for cid in card_ids:
         assert client.get(f"/lookahead/cards/{cid}").status_code == 404
     assert client.get(f"/lookahead/instances/{inst['id']}").status_code == 404
+
+
+# ── Card ↔ todo round-trip (parsival#71) ──────────────────────────────────────
+
+def _clear_todos():
+    db.conn().execute("DELETE FROM todos")
+
+
+def test_creating_card_creates_linked_todo(client):
+    _wipe_lookahead()
+    _clear_todos()
+    card = client.post("/lookahead/cards",
+                       json=_card_payload(title="Weld frame")).json()
+    todo_id = db.get_card_todo_id(card["id"])
+    assert todo_id is not None
+    todo = db.get_todo_by_id(todo_id)
+    assert todo["description"] == "Weld frame"
+    assert todo["deadline"] == card["end_date"]
+    assert todo["project_tag"] == "P905"
+    assert todo["source"] == "lookahead"
+    assert todo["done"] == 0
+
+
+def test_completing_card_marks_linked_todo_done(client):
+    _wipe_lookahead()
+    _clear_todos()
+    card = client.post("/lookahead/cards", json=_card_payload()).json()
+    todo_id = db.get_card_todo_id(card["id"])
+    client.patch(f"/lookahead/cards/{card['id']}", json={"status": "done"})
+    todo = db.get_todo_by_id(todo_id)
+    assert todo["done"] == 1
+    assert todo["status"] == "done"
+
+
+def test_completing_todo_marks_linked_card_done(client):
+    _wipe_lookahead()
+    _clear_todos()
+    card = client.post("/lookahead/cards", json=_card_payload()).json()
+    todo_id = db.get_card_todo_id(card["id"])
+    r = client.patch(f"/todos/{todo_id}", json={"status": "done"})
+    assert r.status_code == 200
+    card_after = client.get(f"/lookahead/cards/{card['id']}").json()
+    assert card_after["status"] == "done"
+
+
+def test_reopening_todo_reopens_linked_card(client):
+    _wipe_lookahead()
+    _clear_todos()
+    card = client.post("/lookahead/cards",
+                       json=_card_payload(status="done")).json()
+    todo_id = db.get_card_todo_id(card["id"])
+    # Card was created done; its todo should be done too.
+    assert db.get_todo_by_id(todo_id)["done"] == 1
+    client.patch(f"/todos/{todo_id}", json={"status": "open"})
+    card_after = client.get(f"/lookahead/cards/{card['id']}").json()
+    assert card_after["status"] == "planned"
+
+
+def test_deleting_card_deletes_linked_todo(client):
+    _wipe_lookahead()
+    _clear_todos()
+    card = client.post("/lookahead/cards", json=_card_payload()).json()
+    todo_id = db.get_card_todo_id(card["id"])
+    client.delete(f"/lookahead/cards/{card['id']}")
+    assert db.get_todo_by_id(todo_id) is None
+
+
+def test_deleting_todo_unlinks_from_card(client):
+    _wipe_lookahead()
+    _clear_todos()
+    card = client.post("/lookahead/cards", json=_card_payload()).json()
+    todo_id = db.get_card_todo_id(card["id"])
+    client.delete(f"/todos/{todo_id}")
+    # Card survives; link row gone.
+    assert client.get(f"/lookahead/cards/{card['id']}").status_code == 200
+    assert db.get_card_todo_id(card["id"]) is None
+
+
+def test_user_links_preserve_todo_link(client):
+    _wipe_lookahead()
+    _clear_todos()
+    card = client.post("/lookahead/cards", json=_card_payload()).json()
+    todo_id = db.get_card_todo_id(card["id"])
+    # User edits the card's manual links — todo link must survive.
+    client.patch(f"/lookahead/cards/{card['id']}",
+                 json={"links": [{"type": "situation", "id": "sit-1"}]})
+    assert db.get_card_todo_id(card["id"]) == todo_id
+
+
+def test_backfill_creates_todos_for_orphan_cards():
+    import app as _app
+    _wipe_lookahead()
+    db.conn().execute("DELETE FROM todos")
+    # Raw-insert a card so no todo/link is created.
+    db.upsert_lookahead_card({
+        "id": "orphan-1", "title": "Legacy card", "project": "P905",
+        "assignee": "Alice", "start_date": "2026-04-15",
+        "start_shift_num": 1, "end_date": "2026-04-16",
+        "end_shift_num": 1, "status": "planned",
+    })
+    # Reset the marker so the backfill can run again in this test run.
+    db.conn().execute("DELETE FROM model_state WHERE key = ?",
+                      ("lookahead_todo_backfill_v1",))
+    _app._backfill_lookahead_todos()
+    todo_id = db.get_card_todo_id("orphan-1")
+    assert todo_id is not None
+    assert db.get_todo_by_id(todo_id)["description"] == "Legacy card"
+    # Second invocation is a no-op (marker set).
+    before = db.get_todo_by_id(todo_id)["id"]
+    _app._backfill_lookahead_todos()
+    assert db.get_card_todo_id("orphan-1") == before

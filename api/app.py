@@ -1777,6 +1777,13 @@ def patch_todo(doc_id: int, body: dict):
     if updates:
         with db.lock:
             db.update_todo(doc_id, updates)
+            if "done" in updates:
+                card_ids = db.get_cards_for_todo(doc_id)
+                new_status = "done" if updates["done"] else "planned"
+                for cid in card_ids:
+                    card = db.get_lookahead_card(cid)
+                    if card and card.get("status") != new_status:
+                        db.upsert_lookahead_card({"id": cid, "status": new_status})
     return {"ok": True}
 
 
@@ -1789,7 +1796,14 @@ def delete_todo(doc_id: int):
     :return: HTTP 204 No Content.
     """
     with db.lock:
+        card_ids = db.get_cards_for_todo(doc_id)
         db.delete_todo_by_id(doc_id)
+        for cid in card_ids:
+            db.conn().execute(
+                "DELETE FROM lookahead_card_links "
+                "WHERE card_id = ? AND link_type = 'todo' AND target_id = ?",
+                (cid, str(doc_id)),
+            )
     return Response(status_code=204)
 
 
@@ -3457,6 +3471,55 @@ def lookahead_get_card(card_id: str):
     return card
 
 
+def _card_todo_payload(card: dict) -> dict:
+    """Build the todo row that mirrors a look-ahead card."""
+    desc = (card.get("title") or "").strip() or f"Card {card.get('id')}"
+    project = card.get("project") or None
+    deadline = card.get("end_date") or None
+    status = "done" if card.get("status") == "done" else "open"
+    return {
+        "description": desc,
+        "priority":    "medium",
+        "is_manual":   1,
+        "done":        1 if status == "done" else 0,
+        "status":      status,
+        "created_at":  datetime.now(timezone.utc).isoformat(),
+        "source":      "lookahead",
+        "title":       desc,
+        "url":         "",
+        "owner":       card.get("assignee") or "me",
+        "deadline":    deadline,
+        "project_tag": project,
+    }
+
+
+def _create_todo_for_card(card: dict) -> int:
+    """Insert a todo mirroring ``card`` and link it. Returns the todo id."""
+    todo_id = db.insert_todo(_card_todo_payload(card))
+    db.set_card_todo_link(card["id"], todo_id)
+    return todo_id
+
+
+def _backfill_lookahead_todos() -> None:
+    """One-time: create a linked todo for every existing card that has none.
+
+    Guarded by a ``model_state`` marker so it runs once per database.
+    """
+    marker = "lookahead_todo_backfill_v1"
+    with db.lock:
+        if db.get_model_state(marker):
+            return
+        orphans = db.list_cards_without_todo()
+        for card in orphans:
+            _create_todo_for_card(card)
+        db.set_model_state(marker, {"done": True, "count": len(orphans)})
+    if orphans:
+        _log.info("backfilled %d look-ahead card todo(s)", len(orphans))
+
+
+_backfill_lookahead_todos()
+
+
 @app.post("/lookahead/cards")
 def lookahead_create_card(body: dict):
     data = _card_input(body, require_all=True)
@@ -3472,6 +3535,8 @@ def lookahead_create_card(body: dict):
             db.set_card_links(card["id"], body["links"] or [])
         if "resources" in body:
             db.set_card_resources(card["id"], body["resources"] or [])
+        if db.get_card_todo_id(card["id"]) is None:
+            _create_todo_for_card(card)
         return db.get_lookahead_card(card["id"])
 
 
@@ -3492,6 +3557,26 @@ def lookahead_update_card(card_id: str, body: dict):
         if "resources" in body:
             db.set_card_resources(card_id, body["resources"] or [])
         card = db.get_lookahead_card(card_id)
+        todo_id = db.get_card_todo_id(card_id)
+        if todo_id is None:
+            todo_id = _create_todo_for_card(card)
+        todo_updates = {}
+        if "title" in data:
+            new_desc = (data["title"] or "").strip() or f"Card {card_id}"
+            todo_updates["description"] = new_desc
+            todo_updates["title"]       = new_desc
+        if "end_date" in data:
+            todo_updates["deadline"] = data["end_date"] or None
+        if "project" in data:
+            todo_updates["project_tag"] = data["project"] or None
+        if "assignee" in data:
+            todo_updates["owner"] = data["assignee"] or "me"
+        if "status" in data:
+            new_done = 1 if data["status"] == "done" else 0
+            todo_updates["done"]   = new_done
+            todo_updates["status"] = "done" if new_done else "open"
+        if todo_updates:
+            db.update_todo(todo_id, todo_updates)
         if card.get("template_instance_id"):
             db.maybe_autocomplete_instance(card["template_instance_id"])
         return card
@@ -3500,7 +3585,10 @@ def lookahead_update_card(card_id: str, body: dict):
 @app.delete("/lookahead/cards/{card_id}")
 def lookahead_delete_card(card_id: str):
     with db.lock:
+        todo_id = db.get_card_todo_id(card_id)
         db.delete_lookahead_card(card_id)
+        if todo_id is not None:
+            db.delete_todo_by_id(todo_id)
     return {"ok": True}
 
 

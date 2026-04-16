@@ -5667,18 +5667,26 @@ function _laRenderOverviewBoard() {
   }
   const resource = $('laResourceFilter')?.value || '';
   let body = '';
-  _LA.overview.forEach((row, idx) => {
-    const gridRow = 2 + idx;
-    body += `<div class="la-lane-label" title="${esc(row.project)}" onclick="_laJumpToProject('${esc(row.project)}')" style="grid-row:${gridRow};cursor:pointer">${esc(row.project)}</div>`;
+  let rowCursor = 2;
+  _LA.overview.forEach((row) => {
+    // Overview hides overdue cards (no gutter), so pack only the visible set
+    // into sub-rows so overlapping cards stack vertically like project view.
+    const visibleCards = row.cards.filter(c =>
+      !(c.end_date < _LA.rangeStart && c.status !== 'done'));
+    const { assigned, subrowCount } = _laPackLane(visibleCards);
+    const startRow = rowCursor;
+    const endRow   = rowCursor + subrowCount;
+    const span = `grid-row:${startRow} / ${endRow}`;
+    body += `<div class="la-lane-label" title="${esc(row.project)}" onclick="_laJumpToProject('${esc(row.project)}')" style="${span};cursor:pointer">${esc(row.project)}</div>`;
     for (let i = 0; i < 14; i++) {
       const iso = _laAddDays(_LA.rangeStart, i);
       const cls = iso === todayISO ? 'la-day-cell today' : 'la-day-cell';
-      body += `<div class="${cls}" style="grid-row:${gridRow}"></div>`;
+      // Pin each cell to its explicit column so multi-row spans don't let
+      // auto-flow shuffle them (CSS grid auto-flow trap).
+      body += `<div class="${cls}" data-day-iso="${iso}" style="grid-column:${2 + i}; ${span}"></div>`;
     }
-    for (const card of row.cards) {
-      const style = _laBarStyle(card, gridRow);
-      // Overdue cards in overview are hidden (overview has no overdue gutter).
-      if (style.indexOf('2 / 3') !== -1) continue;
+    visibleCards.forEach((card, idx) => {
+      const style = _laBarStyle(card, startRow + assigned[idx]);
       const highlight = resource && (card.resources||[]).some(r => String(r.resource_id) === String(resource));
       const cls = highlight ? 'la-overview-bar highlight' : 'la-overview-bar';
       // Overview grid lacks the overdue gutter (col 2 in project view),
@@ -5687,7 +5695,8 @@ function _laRenderOverviewBoard() {
         `grid-column: ${Number(s)-1} / ${Number(e)-1}`);
       body += `<div class="${cls}" style="${shifted}" title="${esc(card.title)} — ${esc(card.assignee||'')}"
                    onclick="_laJumpToProject('${esc(row.project)}','${esc(card.id)}')">${esc(card.title)}</div>`;
-    }
+    });
+    rowCursor = endRow;
   });
   return `<div class="la-board overview">${head}${body}</div>`;
 }

@@ -79,7 +79,7 @@ _in_flight_ids: set[str] = set()
 
 # Fan-out for /ingest: number of items analysed concurrently so merLLM's
 # scheduler sees more than one parsival job at a time and can distribute
-# them across GPU slots (squire#75). merLLM still owns GPU concurrency —
+# them across GPU slots (parsival#75). merLLM still owns GPU concurrency —
 # this cap only governs how many HTTP calls parsival holds open at once.
 def _ingest_concurrency() -> int:
     try:
@@ -673,7 +673,7 @@ def process_ingest_items(raw: list[RawItem]) -> None:
 
     Items are fanned out over a bounded ``ThreadPoolExecutor`` so merLLM's
     scheduler sees multiple parsival jobs at once and can dispatch them
-    across GPU slots (squire#75). Concurrency is capped by
+    across GPU slots (parsival#75). Concurrency is capped by
     ``INGEST_CONCURRENCY`` (default 4) — enough to keep both GPUs busy
     with a little queue headroom, without holding hundreds of HTTP calls
     open at once. GPU-level concurrency remains owned by merLLM.

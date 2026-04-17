@@ -129,7 +129,7 @@ def test_sync_path_allows_concurrent_llm_calls():
 def test_single_ingest_batch_fans_out_over_merllm(monkeypatch):
     """One ``process_ingest_items`` call must fan its items out concurrently.
 
-    squire#75: parsival was looping items sequentially, so merLLM's
+    parsival#75: parsival was looping items sequentially, so merLLM's
     scheduler only ever saw one outstanding job and routed every call to
     the same GPU slot. A batch of 4 items must land at least 2 analyze()
     calls in flight at once so both GPUs can be utilised.
@@ -174,7 +174,7 @@ def test_single_ingest_batch_fans_out_over_merllm(monkeypatch):
             assert arrivals.wait(timeout=5.0), (
                 "Only one analyze() call was in flight — parsival is "
                 "serialising items inside a single ingest batch. "
-                "squire#75: fan items out so merLLM sees >1 job."
+                "parsival#75: fan items out so merLLM sees >1 job."
             )
             assert concurrent_peak >= 2, (
                 f"concurrent_peak={concurrent_peak}, expected >= 2"

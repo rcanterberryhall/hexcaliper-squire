@@ -468,6 +468,34 @@ def test_save_analysis_does_not_duplicate_todos():
     assert len(todos.all()) == 1
 
 
+def test_save_analysis_dedups_todos_across_conversation_thread():
+    """parsival#77: two replies in the same Outlook thread (different
+    item_ids, same conversation_id) with near-identical action items must
+    only produce one todo row."""
+    action1 = ActionItem(description="Receive replacement transformer", deadline=None, owner="me")
+    action2 = ActionItem(description="receive replacement transformer.", deadline=None, owner="me")
+    a1 = _make_analysis("reply-1", has_action=True, category="task", action_items=[action1])
+    a2 = _make_analysis("reply-2", has_action=True, category="task", action_items=[action2])
+    a1.conversation_id = "conv-xfr"
+    a2.conversation_id = "conv-xfr"
+    _save_analysis(a1)
+    _save_analysis(a2)
+    assert len(todos.all()) == 1
+
+
+def test_save_analysis_allows_same_description_in_different_conversations():
+    """Don't dedup across unrelated threads — same wording, different
+    conversation_id means two distinct tasks."""
+    action = ActionItem(description="Review the quote", deadline=None, owner="me")
+    a1 = _make_analysis("conv-a-1", has_action=True, category="task", action_items=[action])
+    a2 = _make_analysis("conv-b-1", has_action=True, category="task", action_items=[action])
+    a1.conversation_id = "thread-a"
+    a2.conversation_id = "thread-b"
+    _save_analysis(a1)
+    _save_analysis(a2)
+    assert len(todos.all()) == 2
+
+
 def test_save_analysis_does_not_duplicate_intel():
     """Calling _save_analysis twice with the same information_item must produce
     exactly one intel row."""

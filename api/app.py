@@ -641,36 +641,43 @@ def _save_analysis(a: Analysis, reanalyze: bool = False) -> None:
 
         if a.has_action and a.category != "fyi":
             for item in a.action_items:
-                if not db.todo_exists(a.item_id, item.description):
-                    # Auto-assign when the LLM identifies the task belongs to
-                    # someone other than the user.  Resolve their email from
-                    # To/CC fields; fall back to the owner name if not found.
-                    auto_assigned_to = None
-                    auto_status      = "open"
-                    if item.owner and item.owner.lower() not in ("me", config.USER_NAME.lower()):
-                        resolved = resolve_owner_email(item.owner, a.to_field, a.cc_field)
-                        auto_assigned_to = resolved or item.owner
-                        auto_status      = "assigned"
+                if db.todo_exists(a.item_id, item.description):
+                    continue
+                # parsival#77: widen dedup across the Outlook reply chain so
+                # the LLM re-extracting the same task on each reply doesn't
+                # spawn a fresh todo per item_id.
+                if db.todo_exists_in_conversation(a.conversation_id, item.description):
+                    continue
 
-                    # Manual overrides (set by the user before a reanalyze) win.
-                    override         = todo_overrides.get(item.description, {})
-                    assigned_to      = override.get("assigned_to") or auto_assigned_to
-                    status           = override.get("status")      or auto_status
+                # Auto-assign when the LLM identifies the task belongs to
+                # someone other than the user.  Resolve their email from
+                # To/CC fields; fall back to the owner name if not found.
+                auto_assigned_to = None
+                auto_status      = "open"
+                if item.owner and item.owner.lower() not in ("me", config.USER_NAME.lower()):
+                    resolved = resolve_owner_email(item.owner, a.to_field, a.cc_field)
+                    auto_assigned_to = resolved or item.owner
+                    auto_status      = "assigned"
 
-                    db.insert_todo({
-                        "item_id":     a.item_id,
-                        "source":      a.source,
-                        "title":       a.title,
-                        "url":         a.url,
-                        "description": item.description,
-                        "deadline":    item.deadline,
-                        "owner":       item.owner,
-                        "priority":    a.priority,
-                        "done":        0,
-                        "status":      status,
-                        "assigned_to": assigned_to,
-                        "created_at":  now_iso(),
-                    })
+                # Manual overrides (set by the user before a reanalyze) win.
+                override         = todo_overrides.get(item.description, {})
+                assigned_to      = override.get("assigned_to") or auto_assigned_to
+                status           = override.get("status")      or auto_status
+
+                db.insert_todo({
+                    "item_id":     a.item_id,
+                    "source":      a.source,
+                    "title":       a.title,
+                    "url":         a.url,
+                    "description": item.description,
+                    "deadline":    item.deadline,
+                    "owner":       item.owner,
+                    "priority":    a.priority,
+                    "done":        0,
+                    "status":      status,
+                    "assigned_to": assigned_to,
+                    "created_at":  now_iso(),
+                })
 
         for item in a.information_items:
             if not item.get("fact"):

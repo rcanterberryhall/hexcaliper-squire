@@ -38,6 +38,7 @@ run raw SQL when the helpers do not cover a use-case.
 """
 import json
 import os
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -806,6 +807,33 @@ def todo_exists(item_id: str, description: str) -> bool:
         (item_id, description),
     ).fetchone()
     return row is not None
+
+
+_WS_RE = re.compile(r"\s+")
+
+
+def _norm_desc(s: str) -> str:
+    # Whitespace/punctuation/case normalization for cross-item dedup (parsival#77).
+    # Paraphrase drift is out of scope — embedding-based near-dup is the follow-up.
+    return _WS_RE.sub(" ", (s or "").strip()).rstrip(".!?").lower()
+
+
+def todo_exists_in_conversation(conversation_id: str, description: str) -> bool:
+    """True if any item in this conversation already has a matching todo.
+
+    A single Outlook reply chain shares one conversation_id across many
+    item_ids, so per-item todo_exists misses duplicates the LLM re-emits on
+    each reply. Widens the scope to the thread and normalizes descriptions.
+    """
+    if not conversation_id:
+        return False
+    rows = conn().execute(
+        "SELECT t.description FROM todos t JOIN items i ON t.item_id = i.item_id "
+        "WHERE i.conversation_id = ?",
+        (conversation_id,),
+    ).fetchall()
+    target = _norm_desc(description)
+    return any(_norm_desc(r[0]) == target for r in rows)
 
 
 def insert_todo(data: dict) -> int:

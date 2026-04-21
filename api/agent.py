@@ -622,67 +622,6 @@ def _recipient_scope_hint(scope_info: dict, user_name: str) -> str:
     return f"\n- Recipient scope: {scope}. {body}"
 
 
-def postprocess_action_items(
-    action_items: list["ActionItem"],
-    scope_info: dict,
-    body: str,
-    user_name: str,
-    user_email: str,
-) -> list["ActionItem"]:
-    """
-    Safety net for owner=me false positives on broadcast/group emails.
-
-    When recipient scope is ``"group"`` or ``"broadcast"`` AND the message
-    body does not explicitly name the user (or their email), strip action
-    items whose owner is ``"me"``.  Action items with ``owner=<another
-    person>`` are ALWAYS kept — they are the delegated-work signal the user
-    tracks.
-
-    No-op for ``"direct"`` / ``"small"`` scopes, and for messages where the
-    user is named in the body (leaves the LLM's judgment alone).
-
-    :param action_items: Action items returned by the LLM.
-    :param scope_info:   Result of :func:`compute_recipient_scope`.
-    :param body:         Message body text (used to check for user mentions).
-    :param user_name:    Configured user display name.
-    :param user_email:   Configured user email.
-    :return: Filtered list of action items.
-    :rtype: list[ActionItem]
-    """
-    if scope_info["scope"] not in ("group", "broadcast"):
-        return action_items
-
-    body_l = (body or "").lower()
-    user_n = (user_name or "").lower().strip()
-    user_e = (user_email or "").lower().strip()
-
-    def _user_mentioned() -> bool:
-        if user_e and user_e in body_l:
-            return True
-        if user_n and user_n in body_l:
-            return True
-        if user_n:
-            first = user_n.split()[0] if user_n else ""
-            if first and _re.search(rf"\b{_re.escape(first)}\b", body_l):
-                return True
-        return False
-
-    if _user_mentioned():
-        return action_items
-
-    kept: list = []
-    for a in action_items:
-        owner = (a.owner or "").lower().strip()
-        if owner in ("", "me"):
-            log.info(
-                "scope=%s: stripping owner=me action_item (user not named in body): %s",
-                scope_info["scope"], (a.description or "")[:80],
-            )
-            continue
-        kept.append(a)
-    return kept
-
-
 def resolve_owner_email(owner: str, *header_fields: str) -> str | None:
     """
     Try to resolve a person's name to an email address.
@@ -1130,7 +1069,6 @@ def build_analysis_from_llm_json(
     :mod:`orchestrator` so the two cannot drift.  Applies every deterministic
     override the sync path applies:
 
-    - ``postprocess_action_items`` (recipient-scope safety net)
     - ``_detect_quarantine_noise`` (quarantine digests → noise)
     - ``fyi`` / ``noise`` clears any action items the LLM returned
     - Jira fallback (open tickets always get a "Work on: …" action item)
@@ -1166,14 +1104,10 @@ def build_analysis_from_llm_json(
         if a.get("description")
     ]
 
-    # Recipient-scope safety net: in group/broadcast emails where the user
-    # is not named in the body, strip owner="me" false positives.  Items
-    # assigned to OTHER named people are always preserved so delegated-work
-    # tracking continues to work.
-    action_items = postprocess_action_items(
-        action_items, scope_info, item.body,
-        config.USER_NAME or "", config.USER_EMAIL or "",
-    )
+    # No regex safety net here by design (issue #83): the LLM is given a
+    # cleaned body (quoted chain + SafeLinks stripped) and explicit
+    # negative-example rules in the prompt.  Relying on string-match heuristics
+    # over a noisy body was the failure mode we just fixed.
 
     information_items = [
         {"fact": i.get("fact", ""), "relevance": i.get("relevance", "")}

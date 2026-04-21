@@ -220,95 +220,6 @@ def _ai(desc, owner="me"):
     return ActionItem(description=desc, deadline=None, owner=owner)
 
 
-class TestPostprocessActionItems:
-    def _scope(self, label):
-        return {
-            "scope": label, "to_count": 0, "cc_count": 0, "total": 12,
-            "dls": [], "user_in_to": True, "user_in_cc": False,
-        }
-
-    def test_direct_scope_is_noop(self):
-        items = [_ai("Do thing")]
-        r = agent.postprocess_action_items(
-            items, {"scope": "direct", "total": 1, "dls": []},
-            "please do this", "Alice", "alice@co.com",
-        )
-        assert len(r) == 1
-
-    def test_small_scope_is_noop(self):
-        items = [_ai("Do thing")]
-        r = agent.postprocess_action_items(
-            items, {"scope": "small", "total": 3, "dls": []},
-            "please do this", "Alice", "alice@co.com",
-        )
-        assert len(r) == 1
-
-    def test_broadcast_strips_owner_me_when_user_not_named(self):
-        items = [_ai("Review the doc")]
-        r = agent.postprocess_action_items(
-            items, self._scope("broadcast"),
-            "Everyone please review the doc by Friday.",
-            "Alice", "alice@co.com",
-        )
-        assert r == []
-
-    def test_broadcast_keeps_owner_me_when_user_named_in_body(self):
-        items = [_ai("Review the doc")]
-        r = agent.postprocess_action_items(
-            items, self._scope("broadcast"),
-            "Alice, please review the doc by Friday.",
-            "Alice", "alice@co.com",
-        )
-        assert len(r) == 1
-
-    def test_broadcast_keeps_owner_me_when_email_in_body(self):
-        items = [_ai("Review the doc")]
-        r = agent.postprocess_action_items(
-            items, self._scope("broadcast"),
-            "Need alice@co.com to handle this.",
-            "Alice Smith", "alice@co.com",
-        )
-        assert len(r) == 1
-
-    def test_broadcast_always_keeps_owner_other(self):
-        """Delegated-work tracking — owner=<other person> survives regardless."""
-        items = [
-            _ai("Pull drawings for P905", owner="Mike"),
-            _ai("Generic thing",          owner="me"),
-        ]
-        r = agent.postprocess_action_items(
-            items, self._scope("broadcast"),
-            "Mike, please pull the drawings for P905 by Thursday.",
-            "Alice", "alice@co.com",
-        )
-        # "me" stripped (Alice not named), "Mike" kept
-        assert len(r) == 1
-        assert r[0].owner == "Mike"
-
-    def test_group_scope_strips_owner_me_but_keeps_others(self):
-        items = [
-            _ai("Approve budget",         owner="me"),
-            _ai("Sarah to review specs",  owner="Sarah"),
-        ]
-        r = agent.postprocess_action_items(
-            items, self._scope("group") | {"scope": "group", "total": 7},
-            "Sarah, can you review the specs? Also team, please approve budget.",
-            "Alice", "alice@co.com",
-        )
-        # Alice not named; "me" item stripped, "Sarah" item kept
-        assert len(r) == 1
-        assert r[0].owner == "Sarah"
-
-    def test_first_name_match_keeps_owner_me(self):
-        items = [_ai("Review the doc")]
-        r = agent.postprocess_action_items(
-            items, self._scope("broadcast"),
-            "Alice — can you review this?",
-            "Alice Smith", "alice.smith@co.com",
-        )
-        assert len(r) == 1
-
-
 # ── build_analysis_from_llm_json (shared helper) ──────────────────────────────
 
 class TestBuildAnalysisFromLlmJson:
@@ -464,32 +375,6 @@ class TestBuildAnalysisFromLlmJson:
             _cfg.PROJECTS = _saved
         assert isinstance(result.project_tag, (str, type(None)))
         assert result.project_tag == "beta"
-
-    def test_broadcast_scope_strips_owner_me(self):
-        """The recipient-scope safety net runs inside the helper, not just
-        in analyze().  Both paths get the same protection."""
-        item = RawItem(
-            source="outlook", item_id="x7", title="Team announce",
-            body="Everyone please review the doc by Friday.",
-            url="", author="boss@co.com",
-            timestamp="2026-04-10T10:00:00+00:00",
-            metadata={"to": "team@co.com", "cc": ""},
-        )
-        payload = {
-            "category": "task", "priority": "medium",
-            "action_items": [{"description": "Review the doc", "owner": "me"}],
-        }
-        # Configure user so postprocess_action_items can check name match
-        import config as _cfg
-        _name, _email = _cfg.USER_NAME, _cfg.USER_EMAIL
-        _cfg.USER_NAME, _cfg.USER_EMAIL = "Alice", "alice@co.com"
-        try:
-            result = agent.build_analysis_from_llm_json(
-                item, json.dumps(payload), scope_info=self._broadcast_scope(),
-            )
-        finally:
-            _cfg.USER_NAME, _cfg.USER_EMAIL = _name, _email
-        assert result.action_items == []
 
     def test_metadata_fields_propagate_to_analysis(self):
         item = RawItem(

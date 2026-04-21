@@ -772,8 +772,6 @@ def test_apply_batch_result_preserves_delegated_owner():
     status='assigned' and assigned_to resolved from the To header.  Both
     paths (sync analyze() + batch _apply_batch_result) funnel through
     build_analysis_from_llm_json, which no longer runs postprocess_action_items."""
-    import json as _json
-
     # Seed the item row _raw_item_from_record will hydrate
     db.upsert_item({
         "item_id":          "batch-rv17-83",
@@ -790,7 +788,7 @@ def test_apply_batch_result_preserves_delegated_owner():
         "conversation_id":  "conv-2",
     })
 
-    llm_response = _json.dumps({
+    _apply_fake_batch_result("batch-rv17-83", {
         "category":    "task",
         "priority":    "medium",
         "has_action":  True,
@@ -803,14 +801,6 @@ def test_apply_batch_result_preserves_delegated_owner():
         "information_items": [],
         "goals": [], "key_dates": [],
     })
-
-    with db.lock:
-        rec = db.get_item("batch-rv17-83")
-    assert rec is not None
-
-    with patch("situation_manager._spawn_situation_task"), \
-         patch("orchestrator.graph.index_item"):
-        orchestrator._apply_batch_result(rec, llm_response)
 
     rows = db.get_todos_for_item("batch-rv17-83")
     assert len(rows) == 1, rows

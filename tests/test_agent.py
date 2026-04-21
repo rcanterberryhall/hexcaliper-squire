@@ -661,3 +661,51 @@ class TestBodyCleaning:
         assert "safelinks" not in out.lower()
         # The period that ended the URL's sentence must survive.
         assert ". Next sentence." in out
+
+    def test_strip_safelinks_multiple_urls(self):
+        from agent import _strip_safelinks
+        body = (
+            "See https://a.safelinks.protection.outlook.com/?x=1 and "
+            "https://b.safelinks.protection.outlook.com/?y=2 for details."
+        )
+        out = _strip_safelinks(body)
+        assert "safelinks" not in out.lower()
+        assert "See  and  for details." in out or "See and for details." in out.replace("  ", " ")
+
+
+def test_build_prompt_uses_cleaned_body():
+    """The prompt the LLM sees must not contain the quoted reply chain or
+    SafeLinks URLs — those are the artifacts that were tricking the model
+    into owner='me' on broadcast emails (issue #83)."""
+    from agent import build_prompt
+    from models import RawItem
+
+    body_with_noise = (
+        "Question: are we on track for Monday?\n"
+        "\n"
+        "Click https://nam02.safelinks.protection.outlook.com/"
+        "?url=x&data=reid.hall%40prismsystems.com for details.\n"
+        "\n"
+        "-----Original Message-----\n"
+        "From: Someone Else <someone@example.com>\n"
+        "Reid Hall was CC'd on the prior thread.\n"
+    )
+    item = RawItem(
+        source="outlook",
+        item_id="t1",
+        title="Status",
+        body=body_with_noise,
+        url="",
+        author="Sender <s@x.com>",
+        timestamp="2026-04-21T00:00:00",
+        metadata={"to": "reid.hall@prismsystems.com", "cc": "", "direction": "received"},
+    )
+
+    prompt = build_prompt(item)
+
+    # Body-derived fields that should be gone:
+    assert "-----Original Message-----" not in prompt
+    assert "safelinks.protection.outlook.com" not in prompt
+    assert "Reid Hall was CC'd" not in prompt
+    # The real current-message directive must still be there:
+    assert "are we on track for Monday?" in prompt

@@ -906,6 +906,74 @@ def _render_thread_todos_hint(thread_todos: list[dict] | None) -> str:
     )
 
 
+# ── Body cleaning for LLM prompt (issue #83) ──────────────────────────────────
+#
+# The raw Outlook body often contains a quoted reply chain and SafeLinks
+# tracking URLs decorated with the user's email as a parameter.  Both artifacts
+# smuggle the user's name/email into the prompt in positions that are NOT
+# directives to the user, which made the LLM assign owner="me" for tasks
+# actually aimed at other recipients (issue #83).  These helpers produce a
+# cleaned "current message only" body for LLM input; the original body is
+# still stored in items.body_preview and fed to the embedding hint.
+
+#: SafeLinks URLs — Outlook rewrites every external link so the URL contains
+#: the user's email under &data=... .  We drop the whole URL; if the author
+#: wrote a plain-text link adjacent, it is preserved.
+_SAFELINKS_RE = re.compile(
+    r"https://[A-Za-z0-9.-]*safelinks\.protection\.outlook\.com/\S*",
+    re.IGNORECASE,
+)
+
+
+def _strip_quoted_reply_tail(body: str) -> str:
+    """
+    Truncate ``body`` at the first quoted-reply marker line.
+
+    Reuses :data:`signatures._QUOTE_MARKERS` so the set of markers stays in
+    one place.  Conservative: only hard boundaries (``-----Original
+    Message-----``, ``From:`` header start-of-line, ``On <date> ... wrote:``,
+    ``> `` prefix) trigger the cut.  Inline paraphrases of earlier messages
+    are kept.
+
+    :param body: Raw message body.
+    :return: Body truncated at the first quoted-reply marker, or the full
+             body if none matches.
+    """
+    if not body:
+        return body
+    from signatures import _QUOTE_MARKERS  # local import — signatures is leaf
+    lines = body.splitlines()
+    for idx, line in enumerate(lines):
+        for marker in _QUOTE_MARKERS:
+            if marker.match(line):
+                return "\n".join(lines[:idx]).rstrip()
+    return body
+
+
+def _strip_safelinks(body: str) -> str:
+    """
+    Drop Outlook SafeLinks tracking URLs from ``body``.
+
+    These URLs carry the user's email in the ``&data=`` parameter and trip
+    naive "is the user named in this email" checks.  Matching is non-greedy
+    at whitespace boundaries to leave adjacent text intact.
+    """
+    if not body:
+        return body
+    return _SAFELINKS_RE.sub("", body)
+
+
+def _clean_body_for_llm(body: str) -> str:
+    """
+    Produce the cleaned body fed to the LLM for analysis.
+
+    Composition: strip SafeLinks first (so URL fragments in the reply chain
+    cannot survive the chain cut as mid-line remnants), then strip the
+    quoted reply tail.  Idempotent.
+    """
+    return _strip_quoted_reply_tail(_strip_safelinks(body))
+
+
 def build_prompt(item: RawItem, *, thread_todos: list[dict] | None = None) -> str:
     """
     Build the LLM analysis prompt for an item without submitting it.

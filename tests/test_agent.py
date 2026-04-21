@@ -566,3 +566,87 @@ def test_build_prompt_includes_priority_overrides():
         assert "Deadline incoming" in prompt
     finally:
         config.PRIORITY_OVERRIDES = prev
+
+
+class TestBodyCleaning:
+    """Body-cleaning helpers that run before LLM prompt formatting (issue #83)."""
+
+    def test_strip_quoted_reply_tail_outlook_original_message(self):
+        from agent import _strip_quoted_reply_tail
+        body = (
+            "Hi team, question about RV17.\n"
+            "\n"
+            "-----Original Message-----\n"
+            "From: Someone Else <someone@example.com>\n"
+            "Subject: old\n"
+        )
+        out = _strip_quoted_reply_tail(body)
+        assert "Original Message" not in out
+        assert out.strip() == "Hi team, question about RV17."
+
+    def test_strip_quoted_reply_tail_on_date_wrote(self):
+        from agent import _strip_quoted_reply_tail
+        body = (
+            "Did we get started on testing?\n"
+            "\n"
+            "On Fri, Apr 17, 2026 at 12:01 AM Someone <a@b.com> wrote:\n"
+            "> Previous message content\n"
+        )
+        out = _strip_quoted_reply_tail(body)
+        assert "wrote:" not in out
+        assert "Did we get started on testing?" in out
+
+    def test_strip_quoted_reply_tail_from_header_block(self):
+        from agent import _strip_quoted_reply_tail
+        body = (
+            "Peter will cover while I'm out.\n"
+            "\n"
+            "From: Chris Ward <Chris.Ward@UniversalOrlando.com>\n"
+            "Sent: Thursday, April 16, 2026 8:36 AM\n"
+            "To: Pierce, Peter <Peter.Pierce@universalorlando.com>; Reid Hall <reid.hall@prismsystems.com>\n"
+            "Subject: RV17 and next up\n"
+            "\n"
+            "Body of earlier message mentioning Reid Hall\n"
+        )
+        out = _strip_quoted_reply_tail(body)
+        assert "Chris.Ward" not in out
+        assert "reid.hall" not in out.lower()
+        assert "Peter will cover while I'm out." in out
+
+    def test_strip_quoted_reply_tail_no_markers_returns_unchanged(self):
+        from agent import _strip_quoted_reply_tail
+        body = "Short message with no reply chain."
+        assert _strip_quoted_reply_tail(body) == body
+
+    def test_strip_quoted_reply_tail_handles_empty_string(self):
+        from agent import _strip_quoted_reply_tail
+        assert _strip_quoted_reply_tail("") == ""
+
+    def test_strip_safelinks_preserves_visible_text_drops_tracking_url(self):
+        from agent import _strip_safelinks
+        body = (
+            "Please see https://nam02.safelinks.protection.outlook.com/"
+            "?url=https%3A%2F%2Fexample.com%2Fdoc&data=05%7C01%7Creid.hall"
+            "%40prismsystems.com%7C...\n"
+            "Thanks."
+        )
+        out = _strip_safelinks(body)
+        assert "reid.hall" not in out.lower()
+        assert "safelinks.protection.outlook.com" not in out
+        assert "Thanks." in out
+
+    def test_clean_body_for_llm_composes_both(self):
+        from agent import _clean_body_for_llm
+        body = (
+            "Current message body.\n"
+            "See https://nam02.safelinks.protection.outlook.com/?url=x&data=reid.hall%40prismsystems.com\n"
+            "\n"
+            "-----Original Message-----\n"
+            "From: Other <other@example.com>\n"
+            "Reid Hall was quoted here somewhere.\n"
+        )
+        out = _clean_body_for_llm(body)
+        assert "Current message body." in out
+        assert "Original Message" not in out
+        assert "safelinks" not in out.lower()
+        assert "reid.hall" not in out.lower()

@@ -920,7 +920,7 @@ def _render_thread_todos_hint(thread_todos: list[dict] | None) -> str:
 #: the user's email under &data=... .  We drop the whole URL; if the author
 #: wrote a plain-text link adjacent, it is preserved.
 _SAFELINKS_RE = re.compile(
-    r"https://[A-Za-z0-9.-]*safelinks\.protection\.outlook\.com/\S*",
+    r"https://[A-Za-z0-9.-]*safelinks\.protection\.outlook\.com/[^\s>)]*",
     re.IGNORECASE,
 )
 
@@ -941,7 +941,7 @@ def _strip_quoted_reply_tail(body: str) -> str:
     """
     if not body:
         return body
-    from signatures import _QUOTE_MARKERS  # local import — signatures is leaf
+    from signatures import _QUOTE_MARKERS  # deferred: signatures imports agent at module scope
     lines = body.splitlines()
     for idx, line in enumerate(lines):
         for marker in _QUOTE_MARKERS:
@@ -950,17 +950,28 @@ def _strip_quoted_reply_tail(body: str) -> str:
     return body
 
 
+_SAFELINKS_TRAIL_RE = re.compile(r"[.,!?:;]+$")
+
+
 def _strip_safelinks(body: str) -> str:
     """
     Drop Outlook SafeLinks tracking URLs from ``body``.
 
     These URLs carry the user's email in the ``&data=`` parameter and trip
-    naive "is the user named in this email" checks.  Matching is non-greedy
-    at whitespace boundaries to leave adjacent text intact.
+    naive "is the user named in this email" checks.  Matching stops at
+    whitespace, ``>``, or ``)``.  Any trailing sentence punctuation captured
+    at the end of the match is returned to the output so the surrounding
+    text is not damaged.
     """
     if not body:
         return body
-    return _SAFELINKS_RE.sub("", body)
+
+    def _replace(m: re.Match) -> str:
+        url = m.group(0)
+        trail = _SAFELINKS_TRAIL_RE.search(url)
+        return trail.group(0) if trail else ""
+
+    return _SAFELINKS_RE.sub(_replace, body)
 
 
 def _clean_body_for_llm(body: str) -> str:

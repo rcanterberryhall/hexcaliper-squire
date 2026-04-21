@@ -650,3 +650,14 @@ class TestBodyCleaning:
         assert "Original Message" not in out
         assert "safelinks" not in out.lower()
         assert "reid.hall" not in out.lower()
+
+    def test_strip_safelinks_preserves_trailing_punctuation(self):
+        from agent import _strip_safelinks
+        body = (
+            "Go to https://nam02.safelinks.protection.outlook.com/?url=x&data=y. "
+            "Next sentence."
+        )
+        out = _strip_safelinks(body)
+        assert "safelinks" not in out.lower()
+        # The period that ended the URL's sentence must survive.
+        assert ". Next sentence." in out

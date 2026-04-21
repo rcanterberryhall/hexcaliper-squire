@@ -213,102 +213,6 @@ class TestComputeRecipientScope:
         assert r["user_in_to"] is False
 
 
-# ── Action item post-processing ───────────────────────────────────────────────
-
-def _ai(desc, owner="me"):
-    from models import ActionItem
-    return ActionItem(description=desc, deadline=None, owner=owner)
-
-
-class TestPostprocessActionItems:
-    def _scope(self, label):
-        return {
-            "scope": label, "to_count": 0, "cc_count": 0, "total": 12,
-            "dls": [], "user_in_to": True, "user_in_cc": False,
-        }
-
-    def test_direct_scope_is_noop(self):
-        items = [_ai("Do thing")]
-        r = agent.postprocess_action_items(
-            items, {"scope": "direct", "total": 1, "dls": []},
-            "please do this", "Alice", "alice@co.com",
-        )
-        assert len(r) == 1
-
-    def test_small_scope_is_noop(self):
-        items = [_ai("Do thing")]
-        r = agent.postprocess_action_items(
-            items, {"scope": "small", "total": 3, "dls": []},
-            "please do this", "Alice", "alice@co.com",
-        )
-        assert len(r) == 1
-
-    def test_broadcast_strips_owner_me_when_user_not_named(self):
-        items = [_ai("Review the doc")]
-        r = agent.postprocess_action_items(
-            items, self._scope("broadcast"),
-            "Everyone please review the doc by Friday.",
-            "Alice", "alice@co.com",
-        )
-        assert r == []
-
-    def test_broadcast_keeps_owner_me_when_user_named_in_body(self):
-        items = [_ai("Review the doc")]
-        r = agent.postprocess_action_items(
-            items, self._scope("broadcast"),
-            "Alice, please review the doc by Friday.",
-            "Alice", "alice@co.com",
-        )
-        assert len(r) == 1
-
-    def test_broadcast_keeps_owner_me_when_email_in_body(self):
-        items = [_ai("Review the doc")]
-        r = agent.postprocess_action_items(
-            items, self._scope("broadcast"),
-            "Need alice@co.com to handle this.",
-            "Alice Smith", "alice@co.com",
-        )
-        assert len(r) == 1
-
-    def test_broadcast_always_keeps_owner_other(self):
-        """Delegated-work tracking — owner=<other person> survives regardless."""
-        items = [
-            _ai("Pull drawings for P905", owner="Mike"),
-            _ai("Generic thing",          owner="me"),
-        ]
-        r = agent.postprocess_action_items(
-            items, self._scope("broadcast"),
-            "Mike, please pull the drawings for P905 by Thursday.",
-            "Alice", "alice@co.com",
-        )
-        # "me" stripped (Alice not named), "Mike" kept
-        assert len(r) == 1
-        assert r[0].owner == "Mike"
-
-    def test_group_scope_strips_owner_me_but_keeps_others(self):
-        items = [
-            _ai("Approve budget",         owner="me"),
-            _ai("Sarah to review specs",  owner="Sarah"),
-        ]
-        r = agent.postprocess_action_items(
-            items, self._scope("group") | {"scope": "group", "total": 7},
-            "Sarah, can you review the specs? Also team, please approve budget.",
-            "Alice", "alice@co.com",
-        )
-        # Alice not named; "me" item stripped, "Sarah" item kept
-        assert len(r) == 1
-        assert r[0].owner == "Sarah"
-
-    def test_first_name_match_keeps_owner_me(self):
-        items = [_ai("Review the doc")]
-        r = agent.postprocess_action_items(
-            items, self._scope("broadcast"),
-            "Alice — can you review this?",
-            "Alice Smith", "alice.smith@co.com",
-        )
-        assert len(r) == 1
-
-
 # ── build_analysis_from_llm_json (shared helper) ──────────────────────────────
 
 class TestBuildAnalysisFromLlmJson:
@@ -465,32 +369,6 @@ class TestBuildAnalysisFromLlmJson:
         assert isinstance(result.project_tag, (str, type(None)))
         assert result.project_tag == "beta"
 
-    def test_broadcast_scope_strips_owner_me(self):
-        """The recipient-scope safety net runs inside the helper, not just
-        in analyze().  Both paths get the same protection."""
-        item = RawItem(
-            source="outlook", item_id="x7", title="Team announce",
-            body="Everyone please review the doc by Friday.",
-            url="", author="boss@co.com",
-            timestamp="2026-04-10T10:00:00+00:00",
-            metadata={"to": "team@co.com", "cc": ""},
-        )
-        payload = {
-            "category": "task", "priority": "medium",
-            "action_items": [{"description": "Review the doc", "owner": "me"}],
-        }
-        # Configure user so postprocess_action_items can check name match
-        import config as _cfg
-        _name, _email = _cfg.USER_NAME, _cfg.USER_EMAIL
-        _cfg.USER_NAME, _cfg.USER_EMAIL = "Alice", "alice@co.com"
-        try:
-            result = agent.build_analysis_from_llm_json(
-                item, json.dumps(payload), scope_info=self._broadcast_scope(),
-            )
-        finally:
-            _cfg.USER_NAME, _cfg.USER_EMAIL = _name, _email
-        assert result.action_items == []
-
     def test_metadata_fields_propagate_to_analysis(self):
         item = RawItem(
             source="outlook", item_id="x8", title="t", body="", url="",
@@ -566,3 +444,158 @@ def test_build_prompt_includes_priority_overrides():
         assert "Deadline incoming" in prompt
     finally:
         config.PRIORITY_OVERRIDES = prev
+
+
+class TestBodyCleaning:
+    """Body-cleaning helpers that run before LLM prompt formatting (issue #83)."""
+
+    def test_strip_quoted_reply_tail_outlook_original_message(self):
+        from agent import _strip_quoted_reply_tail
+        body = (
+            "Hi team, question about RV17.\n"
+            "\n"
+            "-----Original Message-----\n"
+            "From: Someone Else <someone@example.com>\n"
+            "Subject: old\n"
+        )
+        out = _strip_quoted_reply_tail(body)
+        assert "Original Message" not in out
+        assert out.strip() == "Hi team, question about RV17."
+
+    def test_strip_quoted_reply_tail_on_date_wrote(self):
+        from agent import _strip_quoted_reply_tail
+        body = (
+            "Did we get started on testing?\n"
+            "\n"
+            "On Fri, Apr 17, 2026 at 12:01 AM Someone <a@b.com> wrote:\n"
+            "> Previous message content\n"
+        )
+        out = _strip_quoted_reply_tail(body)
+        assert "wrote:" not in out
+        assert "Did we get started on testing?" in out
+
+    def test_strip_quoted_reply_tail_from_header_block(self):
+        from agent import _strip_quoted_reply_tail
+        body = (
+            "Peter will cover while I'm out.\n"
+            "\n"
+            "From: Chris Ward <Chris.Ward@UniversalOrlando.com>\n"
+            "Sent: Thursday, April 16, 2026 8:36 AM\n"
+            "To: Pierce, Peter <Peter.Pierce@universalorlando.com>; Reid Hall <reid.hall@prismsystems.com>\n"
+            "Subject: RV17 and next up\n"
+            "\n"
+            "Body of earlier message mentioning Reid Hall\n"
+        )
+        out = _strip_quoted_reply_tail(body)
+        assert "Chris.Ward" not in out
+        assert "reid.hall" not in out.lower()
+        assert "Peter will cover while I'm out." in out
+
+    def test_strip_quoted_reply_tail_no_markers_returns_unchanged(self):
+        from agent import _strip_quoted_reply_tail
+        body = "Short message with no reply chain."
+        assert _strip_quoted_reply_tail(body) == body
+
+    def test_strip_quoted_reply_tail_handles_empty_string(self):
+        from agent import _strip_quoted_reply_tail
+        assert _strip_quoted_reply_tail("") == ""
+
+    def test_strip_safelinks_preserves_visible_text_drops_tracking_url(self):
+        from agent import _strip_safelinks
+        body = (
+            "Please see https://nam02.safelinks.protection.outlook.com/"
+            "?url=https%3A%2F%2Fexample.com%2Fdoc&data=05%7C01%7Creid.hall"
+            "%40prismsystems.com%7C...\n"
+            "Thanks."
+        )
+        out = _strip_safelinks(body)
+        assert "reid.hall" not in out.lower()
+        assert "safelinks.protection.outlook.com" not in out
+        assert "Thanks." in out
+
+    def test_clean_body_for_llm_composes_both(self):
+        from agent import _clean_body_for_llm
+        body = (
+            "Current message body.\n"
+            "See https://nam02.safelinks.protection.outlook.com/?url=x&data=reid.hall%40prismsystems.com\n"
+            "\n"
+            "-----Original Message-----\n"
+            "From: Other <other@example.com>\n"
+            "Reid Hall was quoted here somewhere.\n"
+        )
+        out = _clean_body_for_llm(body)
+        assert "Current message body." in out
+        assert "Original Message" not in out
+        assert "safelinks" not in out.lower()
+        assert "reid.hall" not in out.lower()
+
+    def test_strip_safelinks_preserves_trailing_punctuation(self):
+        from agent import _strip_safelinks
+        body = (
+            "Go to https://nam02.safelinks.protection.outlook.com/?url=x&data=y. "
+            "Next sentence."
+        )
+        out = _strip_safelinks(body)
+        assert "safelinks" not in out.lower()
+        # The period that ended the URL's sentence must survive.
+        assert ". Next sentence." in out
+
+    def test_strip_safelinks_multiple_urls(self):
+        from agent import _strip_safelinks
+        body = (
+            "See https://a.safelinks.protection.outlook.com/?x=1 and "
+            "https://b.safelinks.protection.outlook.com/?y=2 for details."
+        )
+        out = _strip_safelinks(body)
+        assert "safelinks" not in out.lower()
+        assert "See  and  for details." in out or "See and for details." in out.replace("  ", " ")
+
+
+def test_build_prompt_uses_cleaned_body():
+    """The prompt the LLM sees must not contain the quoted reply chain or
+    SafeLinks URLs — those are the artifacts that were tricking the model
+    into owner='me' on broadcast emails (issue #83)."""
+    from agent import build_prompt
+    from models import RawItem
+
+    body_with_noise = (
+        "Question: are we on track for Monday?\n"
+        "\n"
+        "Click https://nam02.safelinks.protection.outlook.com/"
+        "?url=x&data=reid.hall%40prismsystems.com for details.\n"
+        "\n"
+        "-----Original Message-----\n"
+        "From: Someone Else <someone@example.com>\n"
+        "Reid Hall was CC'd on the prior thread.\n"
+    )
+    item = RawItem(
+        source="outlook",
+        item_id="t1",
+        title="Status",
+        body=body_with_noise,
+        url="",
+        author="Sender <s@x.com>",
+        timestamp="2026-04-21T00:00:00",
+        metadata={"to": "reid.hall@prismsystems.com", "cc": "", "direction": "received"},
+    )
+
+    prompt = build_prompt(item)
+
+    # Body-derived fields that should be gone:
+    #   (Note: "-----Original Message-----" now appears in the PROMPT
+    #   action-item rules as a negative-example marker; check the
+    #   quoted-chain *content* instead — the From: header and body below it.)
+    assert "someone@example.com" not in prompt
+    assert "safelinks.protection.outlook.com" not in prompt
+    assert "Reid Hall was CC'd" not in prompt
+    # The real current-message directive must still be there:
+    assert "are we on track for Monday?" in prompt
+
+
+def test_prompt_contains_negative_owner_examples():
+    """The PROMPT template must explicitly call out the three owner='me'
+    traps we saw in real data (issue #83)."""
+    from agent import PROMPT
+    assert "quoted reply" in PROMPT.lower() or "reply chain" in PROMPT.lower()
+    assert "@mention" in PROMPT.lower() or "@-mention" in PROMPT.lower()
+    assert "third party" in PROMPT.lower() or "third-party" in PROMPT.lower()

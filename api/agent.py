@@ -158,6 +158,11 @@ Action item rules:
 - Being in CC means awareness, not ownership — never default owner="me" from CC alone.
 - Use the person's full name as it appears in the To/CC header (e.g. "John Johnson"), not a first-name guess, whenever possible.
 - If a directive has no identifiable owner (no name, no @mention, no direct address) and recipient scope is not "direct", OMIT the action_item rather than guessing.
+- Do NOT assign owner="me" on the basis of the user's name appearing in any of these contexts — they are NOT directives to {user_name}:
+  * A quoted reply chain or forwarded-message header below the current author's message (anything after "-----Original Message-----", "From: …", or "On <date>, <X> wrote:").
+  * An @mention of {user_name} as a third-party to coordinate with (e.g. "…to help coordinate with @{user_name}'s team", "@{user_name}'s crew will handle X").
+  * A tracking URL, disclaimer footer, or "Individualized for <email>" marker.
+  These mentions place {user_name} in the text but do not address them.
 - Past-tense reports of completed work ("we installed X", "the issue was resolved") are NOT action items — put them in information_items instead.
 - Jira issues: has_action=true unless status is Done/Closed; owner="me" (these are pre-assigned).
 - GitHub PR review requests: has_action=true, category=review, owner="me".
@@ -617,67 +622,6 @@ def _recipient_scope_hint(scope_info: dict, user_name: str) -> str:
     return f"\n- Recipient scope: {scope}. {body}"
 
 
-def postprocess_action_items(
-    action_items: list["ActionItem"],
-    scope_info: dict,
-    body: str,
-    user_name: str,
-    user_email: str,
-) -> list["ActionItem"]:
-    """
-    Safety net for owner=me false positives on broadcast/group emails.
-
-    When recipient scope is ``"group"`` or ``"broadcast"`` AND the message
-    body does not explicitly name the user (or their email), strip action
-    items whose owner is ``"me"``.  Action items with ``owner=<another
-    person>`` are ALWAYS kept — they are the delegated-work signal the user
-    tracks.
-
-    No-op for ``"direct"`` / ``"small"`` scopes, and for messages where the
-    user is named in the body (leaves the LLM's judgment alone).
-
-    :param action_items: Action items returned by the LLM.
-    :param scope_info:   Result of :func:`compute_recipient_scope`.
-    :param body:         Message body text (used to check for user mentions).
-    :param user_name:    Configured user display name.
-    :param user_email:   Configured user email.
-    :return: Filtered list of action items.
-    :rtype: list[ActionItem]
-    """
-    if scope_info["scope"] not in ("group", "broadcast"):
-        return action_items
-
-    body_l = (body or "").lower()
-    user_n = (user_name or "").lower().strip()
-    user_e = (user_email or "").lower().strip()
-
-    def _user_mentioned() -> bool:
-        if user_e and user_e in body_l:
-            return True
-        if user_n and user_n in body_l:
-            return True
-        if user_n:
-            first = user_n.split()[0] if user_n else ""
-            if first and _re.search(rf"\b{_re.escape(first)}\b", body_l):
-                return True
-        return False
-
-    if _user_mentioned():
-        return action_items
-
-    kept: list = []
-    for a in action_items:
-        owner = (a.owner or "").lower().strip()
-        if owner in ("", "me"):
-            log.info(
-                "scope=%s: stripping owner=me action_item (user not named in body): %s",
-                scope_info["scope"], (a.description or "")[:80],
-            )
-            continue
-        kept.append(a)
-    return kept
-
-
 def resolve_owner_email(owner: str, *header_fields: str) -> str | None:
     """
     Try to resolve a person's name to an email address.
@@ -906,6 +850,85 @@ def _render_thread_todos_hint(thread_todos: list[dict] | None) -> str:
     )
 
 
+# ── Body cleaning for LLM prompt (issue #83) ──────────────────────────────────
+#
+# The raw Outlook body often contains a quoted reply chain and SafeLinks
+# tracking URLs decorated with the user's email as a parameter.  Both artifacts
+# smuggle the user's name/email into the prompt in positions that are NOT
+# directives to the user, which made the LLM assign owner="me" for tasks
+# actually aimed at other recipients (issue #83).  These helpers produce a
+# cleaned "current message only" body for LLM input; the original body is
+# still stored in items.body_preview and fed to the embedding hint.
+
+#: SafeLinks URLs — Outlook rewrites every external link so the URL contains
+#: the user's email under &data=... .  We drop the whole URL; if the author
+#: wrote a plain-text link adjacent, it is preserved.
+_SAFELINKS_RE = re.compile(
+    r"https://[A-Za-z0-9.-]*safelinks\.protection\.outlook\.com/[^\s>)]*",
+    re.IGNORECASE,
+)
+
+
+def _strip_quoted_reply_tail(body: str) -> str:
+    """
+    Truncate ``body`` at the first quoted-reply marker line.
+
+    Reuses :data:`signatures._QUOTE_MARKERS` so the set of markers stays in
+    one place.  Conservative: only hard boundaries (``-----Original
+    Message-----``, ``From:`` header start-of-line, ``On <date> ... wrote:``,
+    ``> `` prefix) trigger the cut.  Inline paraphrases of earlier messages
+    are kept.
+
+    :param body: Raw message body.
+    :return: Body truncated at the first quoted-reply marker, or the full
+             body if none matches.
+    """
+    if not body:
+        return body
+    from signatures import _QUOTE_MARKERS  # deferred: signatures imports agent at module scope
+    lines = body.splitlines()
+    for idx, line in enumerate(lines):
+        for marker in _QUOTE_MARKERS:
+            if marker.match(line):
+                return "\n".join(lines[:idx]).rstrip()
+    return body
+
+
+_SAFELINKS_TRAIL_RE = re.compile(r"[.,!?:;]+$")
+
+
+def _strip_safelinks(body: str) -> str:
+    """
+    Drop Outlook SafeLinks tracking URLs from ``body``.
+
+    These URLs carry the user's email in the ``&data=`` parameter and trip
+    naive "is the user named in this email" checks.  Matching stops at
+    whitespace, ``>``, or ``)``.  Any trailing sentence punctuation captured
+    at the end of the match is returned to the output so the surrounding
+    text is not damaged.
+    """
+    if not body:
+        return body
+
+    def _replace(m: re.Match) -> str:
+        url = m.group(0)
+        trail = _SAFELINKS_TRAIL_RE.search(url)
+        return trail.group(0) if trail else ""
+
+    return _SAFELINKS_RE.sub(_replace, body)
+
+
+def _clean_body_for_llm(body: str) -> str:
+    """
+    Produce the cleaned body fed to the LLM for analysis.
+
+    Composition: strip SafeLinks first (so URL fragments in the reply chain
+    cannot survive the chain cut as mid-line remnants), then strip the
+    quoted reply tail.  Idempotent.
+    """
+    return _strip_quoted_reply_tail(_strip_safelinks(body))
+
+
 def build_prompt(item: RawItem, *, thread_todos: list[dict] | None = None) -> str:
     """
     Build the LLM analysis prompt for an item without submitting it.
@@ -1010,7 +1033,7 @@ def build_prompt(item: RawItem, *, thread_todos: list[dict] | None = None) -> st
         title        = item.title,
         author       = item.author,
         timestamp    = item.timestamp,
-        body         = item.body,
+        body         = _clean_body_for_llm(item.body),
         user_name    = config.USER_NAME or "the user",
         user_email   = config.USER_EMAIL or "",
         projects_ctx  = _projects_ctx(),
@@ -1046,7 +1069,6 @@ def build_analysis_from_llm_json(
     :mod:`orchestrator` so the two cannot drift.  Applies every deterministic
     override the sync path applies:
 
-    - ``postprocess_action_items`` (recipient-scope safety net)
     - ``_detect_quarantine_noise`` (quarantine digests → noise)
     - ``fyi`` / ``noise`` clears any action items the LLM returned
     - Jira fallback (open tickets always get a "Work on: …" action item)
@@ -1082,14 +1104,10 @@ def build_analysis_from_llm_json(
         if a.get("description")
     ]
 
-    # Recipient-scope safety net: in group/broadcast emails where the user
-    # is not named in the body, strip owner="me" false positives.  Items
-    # assigned to OTHER named people are always preserved so delegated-work
-    # tracking continues to work.
-    action_items = postprocess_action_items(
-        action_items, scope_info, item.body,
-        config.USER_NAME or "", config.USER_EMAIL or "",
-    )
+    # No regex safety net here by design (issue #83): the LLM is given a
+    # cleaned body (quoted chain + SafeLinks stripped) and explicit
+    # negative-example rules in the prompt.  Relying on string-match heuristics
+    # over a noisy body was the failure mode we just fixed.
 
     information_items = [
         {"fact": i.get("fact", ""), "relevance": i.get("relevance", "")}
@@ -1280,7 +1298,7 @@ def analyze(
             title        = item.title,
             author       = item.author,
             timestamp    = item.timestamp,
-            body         = item.body,
+            body         = _clean_body_for_llm(item.body),
             user_name    = config.USER_NAME or "the user",
             user_email   = config.USER_EMAIL or "",
             projects_ctx  = _projects_ctx(),

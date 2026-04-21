@@ -759,3 +759,53 @@ def test_get_briefing_returns_cached_content(client):
     assert len(body["sections"]) == 1
     assert body["sections"][0]["project"] == "Alpha"
     assert "generated_at" in body
+
+
+def test_save_analysis_assigns_delegated_owner_to_assigned_tab():
+    """Regression guard for issue #83's Assigned-tab symptom: when the LLM
+    produces a non-me owner, _save_analysis must set status='assigned' and
+    populate assigned_to so the todo shows up in the Assigned tab."""
+    import db as _db
+
+    a = Analysis(
+        item_id="test-rv17-83",
+        source="outlook",
+        title="RV17 and next up",
+        author="Chris Ward <Chris.Ward@UniversalOrlando.com>",
+        timestamp="2026-04-16T12:36:00",
+        url="",
+        category="task",
+        task_type=None,
+        has_action=True,
+        priority="medium",
+        action_items=[ActionItem(
+            description="Coordinate with Reid Hall's team to determine next RV",
+            deadline=None,
+            owner="Anna Simonitis",
+        )],
+        summary="Coordinate next RV after RV17",
+        urgency_reason=None,
+        hierarchy="project",
+        is_passdown=False,
+        project_tag=None,
+        direction="received",
+        conversation_id="conv-83",
+        conversation_topic=None,
+        goals=[],
+        key_dates=[],
+        body_preview="Hi Tech team, RV17 is almost complete...",
+        to_field="Anna Simonitis <Anna.Simonitis@universalorlando.com>; Reid Hall <reid.hall@prismsystems.com>",
+        cc_field="",
+        is_replied=False,
+        replied_at=None,
+        information_items=[],
+    )
+
+    _save_analysis(a)
+
+    rows = _db.get_todos_for_item("test-rv17-83")
+    assert len(rows) == 1, rows
+    t = rows[0]
+    assert t["owner"] == "Anna Simonitis"
+    assert t["status"] == "assigned", t
+    assert t["assigned_to"] == "anna.simonitis@universalorlando.com"

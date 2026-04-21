@@ -764,3 +764,47 @@ def test_run_reanalyze_aborts_when_merllm_unavailable():
     for iid in ("a1", "a2"):
         rec = analyses.get(Q.item_id == iid)
         assert not rec.get("batch_job_id")
+
+
+def test_apply_batch_result_preserves_delegated_owner():
+    """Regression guard for issue #83 on the BATCH path: when the LLM
+    response assigns owner to another person, the stored todo must have
+    status='assigned' and assigned_to resolved from the To header.  Both
+    paths (sync analyze() + batch _apply_batch_result) funnel through
+    build_analysis_from_llm_json, which no longer runs postprocess_action_items."""
+    # Seed the item row _raw_item_from_record will hydrate
+    db.upsert_item({
+        "item_id":          "batch-rv17-83",
+        "source":           "outlook",
+        "direction":        "received",
+        "title":            "RE: 4/15/2026",
+        "author":           "Alex Washington <alex@dubscontrols.com>",
+        "timestamp":        "2026-04-17T08:42:35",
+        "url":              "",
+        "body_preview":     "Logan, did we get started on CV/LiDAR testing?",
+        "to_field":         "Logan Souza <Logan.Souza@universalorlando.com>; Reid Hall <reid.hall@prismsystems.com>",
+        "cc_field":         "",
+        "hierarchy":        "general",
+        "conversation_id":  "conv-2",
+    })
+
+    _apply_fake_batch_result("batch-rv17-83", {
+        "category":    "task",
+        "priority":    "medium",
+        "has_action":  True,
+        "summary":     "Follow up on CV/LiDAR testing",
+        "hierarchy":   "project",
+        "action_items": [
+            {"description": "Follow up on whether CV/LiDAR testing started",
+             "deadline": None, "owner": "Logan Souza"}
+        ],
+        "information_items": [],
+        "goals": [], "key_dates": [],
+    })
+
+    rows = db.get_todos_for_item("batch-rv17-83")
+    assert len(rows) == 1, rows
+    t = rows[0]
+    assert t["owner"] == "Logan Souza"
+    assert t["status"] == "assigned", t
+    assert t["assigned_to"] == "logan.souza@universalorlando.com"

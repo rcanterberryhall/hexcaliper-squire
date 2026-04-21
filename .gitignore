@@ -27,3 +27,6 @@ data/
 
 # NVIDIA binary (machine-specific, copy before build)
 api/libnvidia-ml.so.1
+
+# Git worktrees (isolated branches)
+.worktrees/

@@ -701,6 +701,19 @@ tr.attn-low  { opacity:0.65; }
   background: var(--bg); border: 1px solid var(--border2); border-radius: var(--r);
   padding: 10px 12px; white-space: pre-wrap; word-break: break-word;
 }
+.detail-body-editor {
+  width: 100%;
+  min-height: 100px;
+  padding: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border2);
+  border-radius: var(--r);
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+}
+.detail-body-editor:focus { border-color: var(--accent); outline: none; }
 .detail-list { list-style: none; padding: 0; }
 .detail-list li { font-size: 11px; color: var(--muted); padding: 4px 0; border-bottom: 1px solid var(--border); line-height: 1.45; }
 .detail-list li:last-child { border-bottom: none; }
@@ -4084,11 +4097,21 @@ function openDetail(item) {
       <div class="detail-value" style="color:var(--muted);font-size:11px">${esc(urgencyText)}</div>
     </div>` : '';
 
-  const bodyText = item.body_preview ? `
+  // Issue #85: editable body. For manual cards, this is the primary notes
+  // surface. For generated cards, it seeds from the email body_preview and
+  // can be annotated; edits are preserved across reanalyze (user_edited_fields).
+  const bodyLabel = isManual ? 'Notes' : 'Content';
+  const bodyText = `
     <div class="detail-section">
-      <div class="detail-label">Content</div>
-      <div class="detail-body-text">${esc(item.body_preview)}</div>
-    </div>` : '';
+      <div class="detail-label">${bodyLabel}</div>
+      <textarea id="detailBody_body_preview"
+                class="detail-body-editor"
+                rows="6"
+                data-item-id="${esc(item.item_id)}"
+                placeholder="${isManual ? 'Write notes about this card…' : ''}"
+                onblur="saveDetailField(this,'body_preview')"
+      >${esc(item.body_preview || '')}</textarea>
+    </div>`;
 
   // Show live todos (with checkboxes) instead of static action_items
   const linkedTodos = allTodos.filter(t => t.item_id === item.item_id);
@@ -4342,6 +4365,19 @@ async function saveDetailEdits(itemId) {
     msg.style.color = 'var(--red)';
     msg.textContent = 'Failed';
     setTimeout(() => { msg.textContent = ''; msg.style.color = ''; }, 3000);
+  }
+}
+
+async function saveDetailField(el, fieldName) {
+  const itemId = el.dataset.itemId || el.closest('[data-item-id]')?.dataset.itemId;
+  if (!itemId) return;
+  const value = el.value;
+  try {
+    await api(`/analyses/${encodeURIComponent(itemId)}`, 'PATCH', { [fieldName]: value });
+    const analysis = findAnalysis(itemId);
+    if (analysis) analysis[fieldName] = value;
+  } catch (e) {
+    console.warn(`saveDetailField(${fieldName}):`, e);
   }
 }
 

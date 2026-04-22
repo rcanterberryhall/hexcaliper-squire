@@ -714,6 +714,16 @@ tr.attn-low  { opacity:0.65; }
   resize: vertical;
 }
 .detail-body-editor:focus { border-color: var(--accent); outline: none; }
+.detail-goals-list, .detail-dates-list { list-style: none; padding: 0; margin: 0 0 6px 0; }
+.detail-goal-row, .detail-date-row { display: flex; gap: 4px; align-items: center; margin-bottom: 4px; }
+.detail-goal-input, .detail-date-desc {
+  flex: 1; padding: 3px 7px; background: var(--bg);
+  border: 1px solid var(--border2); border-radius: var(--r);
+  color: var(--text); font-size: 11px;
+}
+.detail-date-input { padding: 3px 7px; background: var(--bg); border: 1px solid var(--border2); border-radius: var(--r); color: var(--text); font-size: 11px; }
+.detail-add-btn { font-size: 11px; padding: 3px 8px; color: var(--muted); }
+.detail-add-btn:hover { color: var(--accent); }
 .detail-list { list-style: none; padding: 0; }
 .detail-list li { font-size: 11px; color: var(--muted); padding: 4px 0; border-bottom: 1px solid var(--border); line-height: 1.45; }
 .detail-list li:last-child { border-bottom: none; }
@@ -4144,11 +4154,21 @@ function openDetail(item) {
       ).join('')}</ul>
     </div>` : '';
 
-  const goals = (item.goals || []).length ? `
-    <div class="detail-section">
+  const goalsList = Array.isArray(item.goals) ? item.goals : [];
+  const goals = `
+    <div class="detail-section" data-item-id="${esc(item.item_id)}">
       <div class="detail-label">Goals</div>
-      <ul class="detail-list">${(item.goals || []).map(g => `<li>${esc(g)}</li>`).join('')}</ul>
-    </div>` : '';
+      <ul class="detail-goals-list" id="detailGoalsList">
+        ${goalsList.map((g, i) => `
+          <li class="detail-goal-row" data-idx="${i}">
+            <input type="text" class="detail-goal-input" value="${esc(g)}"
+                   onblur="saveGoalEdit('${esc(item.item_id)}', ${i}, this.value)">
+            <button class="ia" onclick="removeGoal('${esc(item.item_id)}', ${i})" title="Remove">✕</button>
+          </li>
+        `).join('')}
+      </ul>
+      <button class="ia detail-add-btn" onclick="addGoal('${esc(item.item_id)}')">+ Add goal</button>
+    </div>`;
 
   const dates = (item.key_dates || []).length ? `
     <div class="detail-section">
@@ -4379,6 +4399,39 @@ async function saveDetailField(el, fieldName) {
   } catch (e) {
     console.warn(`saveDetailField(${fieldName}):`, e);
   }
+}
+
+async function _patchGoals(itemId, newGoals) {
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  try {
+    await api(`/analyses/${encodeURIComponent(itemId)}`, 'PATCH', { goals: newGoals });
+    analysis.goals = newGoals;
+  } catch (e) {
+    console.warn('_patchGoals:', e);
+  }
+}
+async function addGoal(itemId) {
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  const goals = [...(analysis.goals || []), ''];
+  await _patchGoals(itemId, goals);
+  openDetail(analysis); // re-render
+}
+async function removeGoal(itemId, idx) {
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  const goals = [...(analysis.goals || [])];
+  goals.splice(idx, 1);
+  await _patchGoals(itemId, goals);
+  openDetail(analysis);
+}
+async function saveGoalEdit(itemId, idx, value) {
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  const goals = [...(analysis.goals || [])];
+  goals[idx] = value;
+  await _patchGoals(itemId, goals);
 }
 
 function closeDetail() {

@@ -724,6 +724,14 @@ tr.attn-low  { opacity:0.65; }
 .detail-date-input { padding: 3px 7px; background: var(--bg); border: 1px solid var(--border2); border-radius: var(--r); color: var(--text); font-size: 11px; }
 .detail-add-btn { font-size: 11px; padding: 3px 8px; color: var(--muted); }
 .detail-add-btn:hover { color: var(--accent); }
+.detail-title-input {
+  width: 100%; font-size: 14px; font-weight: 600;
+  padding: 3px 6px; background: transparent;
+  border: 1px solid transparent; border-radius: var(--r);
+  color: var(--text);
+}
+.detail-title-input:hover { border-color: var(--border2); }
+.detail-title-input:focus { border-color: var(--accent); outline: none; background: var(--bg); }
 .detail-list { list-style: none; padding: 0; }
 .detail-list li { font-size: 11px; color: var(--muted); padding: 4px 0; border-bottom: 1px solid var(--border); line-height: 1.45; }
 .detail-list li:last-child { border-bottom: none; }
@@ -4067,7 +4075,13 @@ function detailRow(label, value) {
 
 function openDetail(item) {
   if (!item) return;
-  $('detailTitle').textContent = item.title || '(no title)';
+  const titleEl = $('detailTitle');
+  titleEl.innerHTML = `
+    <input type="text" class="detail-title-input"
+           data-item-id="${esc(item.item_id)}"
+           value="${esc(item.title || '')}"
+           placeholder="(no title)"
+           onblur="saveDetailField(this,'title')">`;
 
   // Record opened action for attention model (fire-and-forget)
   if (!_attentionColdStart) {
@@ -4094,18 +4108,26 @@ function openDetail(item) {
     (!isManual && item.replied_at) ? detailRow('Replied', new Date(item.replied_at).toLocaleString()) : '',
   ].filter(Boolean).join('');
 
-  const summary = item.summary ? `
+  const summary = `
     <div class="detail-section">
       <div class="detail-label">Summary</div>
-      <div class="detail-value">${esc(item.summary)}</div>
-    </div>` : '';
+      <textarea class="detail-body-editor" rows="2"
+                data-item-id="${esc(item.item_id)}"
+                placeholder="one-line summary"
+                onblur="saveDetailField(this,'summary')"
+      >${esc(item.summary || '')}</textarea>
+    </div>`;
 
   const urgencyText = item.urgency || item.urgency_reason || '';
-  const urgency = urgencyText ? `
+  const urgency = `
     <div class="detail-section">
       <div class="detail-label">Why This Priority</div>
-      <div class="detail-value" style="color:var(--muted);font-size:11px">${esc(urgencyText)}</div>
-    </div>` : '';
+      <textarea class="detail-body-editor" rows="2"
+                data-item-id="${esc(item.item_id)}"
+                placeholder="why this matters"
+                onblur="saveDetailField(this,'urgency')"
+      >${esc(urgencyText)}</textarea>
+    </div>`;
 
   // Issue #85: editable body. For manual cards, this is the primary notes
   // surface. For generated cards, it seeds from the email body_preview and

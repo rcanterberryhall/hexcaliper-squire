@@ -2532,8 +2532,8 @@ async function createManualCard() {
       description: 'new card',
       priority:    'medium',
     });
-    // Refresh caches, then open the detail panel for the new item.
-    await Promise.all([loadTodos(), loadItems()]);
+    // Best-effort cache refresh; a failed reload must not mask the successful POST.
+    await Promise.allSettled([loadTodos(), loadItems()]);
     const newItemId = resp.item_id || `manual_${resp.doc_id}`;
     openTodoDetail(newItemId);
     if (typeof loadStats === 'function') loadStats();

@@ -808,3 +808,41 @@ def test_apply_batch_result_preserves_delegated_owner():
     assert t["owner"] == "Logan Souza"
     assert t["status"] == "assigned", t
     assert t["assigned_to"] == "logan.souza@universalorlando.com"
+
+
+def test_run_reanalyze_skips_manual_items(client, monkeypatch):
+    """Manual cards have no source message; they must be excluded from the
+    reanalyze batch-submit loop or merLLM wastes a slot on empty input."""
+    import db as _db
+    import orchestrator as _orc
+
+    # Seed a real item plus a synthesized manual item.
+    with _db.lock:
+        _db.upsert_item({
+            "item_id": "real_t3", "source": "outlook",
+            "title": "real email", "body_preview": "hi",
+            "timestamp": "2026-04-20T00:00:00+00:00",
+        })
+        _db.upsert_item({
+            "item_id": "manual_t3", "source": "manual",
+            "title": "my manual card", "body_preview": "",
+            "timestamp": "2026-04-20T00:00:00+00:00",
+        })
+
+    submitted: list[str] = []
+
+    def fake_submit_batch_job(prompt: str) -> str:
+        return "fake-job-id"
+
+    def fake_set_batch_job_id(item_id: str, job_id: str) -> None:
+        submitted.append(item_id)
+
+    monkeypatch.setattr(_orc, "_merllm_batch_available", lambda: True)
+    monkeypatch.setattr(_orc, "_ensure_batch_poll_thread", lambda: None)
+    monkeypatch.setattr(_orc, "_submit_batch_job", fake_submit_batch_job)
+    monkeypatch.setattr(_db, "set_batch_job_id", fake_set_batch_job_id)
+
+    _orc.run_reanalyze()
+
+    assert "real_t3"   in submitted
+    assert "manual_t3" not in submitted

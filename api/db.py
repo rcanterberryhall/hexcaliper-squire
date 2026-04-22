@@ -128,6 +128,51 @@ def conn() -> sqlite3.Connection:
     return _conn
 
 
+def backfill_manual_todo_items() -> int:
+    """Create placeholder items rows for manual todos that predate the
+    synthesized-item model (is_manual=1, item_id IS NULL).
+
+    Each orphan todo gets item_id='manual_<todo_id>' on both the todo and
+    a synthesized items row whose title/body seed from the todo description
+    so the detail panel has something to render.
+
+    Idempotent: runs only against todos still missing item_id.
+
+    Returns the number of rows backfilled.
+    """
+    c = conn()
+    orphans = c.execute(
+        "SELECT id, description, priority, project_tag, created_at "
+        "FROM todos WHERE is_manual = 1 AND (item_id IS NULL OR item_id = '')"
+    ).fetchall()
+    for row in orphans:
+        new_iid = f"manual_{row['id']}"
+        desc    = row["description"] or ""
+        upsert_item({
+            "item_id":      new_iid,
+            "source":       "manual",
+            "direction":    "received",
+            "title":        desc[:200],
+            "author":       "",
+            "timestamp":    row["created_at"] or _now_iso(),
+            "url":          "",
+            "has_action":   1,
+            "priority":     row["priority"] or "medium",
+            "category":     "task",
+            "summary":      "",
+            "action_items": "[]",
+            "hierarchy":    "general",
+            "project_tag":  row["project_tag"],
+            "goals":        "[]",
+            "key_dates":    "[]",
+            "information_items": "[]",
+            "body_preview": "",
+            "references":   "[]",
+        })
+        c.execute("UPDATE todos SET item_id = ? WHERE id = ?", (new_iid, row["id"]))
+    return len(orphans)
+
+
 def _migrate_schema(c: sqlite3.Connection) -> None:
     """Apply incremental schema migrations that cannot use CREATE IF NOT EXISTS."""
     cols = {row[1] for row in c.execute("PRAGMA table_info(items)").fetchall()}
@@ -244,6 +289,12 @@ def _migrate_schema(c: sqlite3.Connection) -> None:
         )
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_slack_seen_chan ON slack_seen_messages(channel_id)")
+
+    # Backfill synthesized items rows for legacy manual todos (issue #85).
+    # Running inside _migrate_schema ensures every live DB catches up exactly
+    # once at next startup; subsequent runs are no-ops because orphans have
+    # already been linked.
+    backfill_manual_todo_items()
 
 
 def _create_schema(c: sqlite3.Connection) -> None:

@@ -932,6 +932,9 @@ def patch_analysis(item_id: str, body: dict, background_tasks: BackgroundTasks):
     :param item_id: Stable ID of the analysis item to update.
     :param body: Partial update dict; accepted keys: ``priority``, ``category``,
                  ``project_tag``, ``is_passdown``.
+                 Content-level fields (issue #85): ``title``, ``summary``,
+                 ``user_summary``, ``urgency_reason``/``urgency``,
+                 ``body_preview``, ``hierarchy``, ``goals``, ``key_dates``.
     :return: ``{"ok": True}`` plus all fields that were actually updated.
     :raises HTTPException 400: If no valid fields are present in ``body``.
     :raises HTTPException 404: If no item with ``item_id`` exists.
@@ -964,11 +967,38 @@ def patch_analysis(item_id: str, body: dict, background_tasks: BackgroundTasks):
         updates["project_tag"] = db.serialize_project_tags(val) if val else None
     if "is_passdown" in body and isinstance(body["is_passdown"], bool):
         updates["is_passdown"] = 1 if body["is_passdown"] else 0
+
+    # Issue #85: content-level rich fields. Writable on both manual and
+    # generated items; preserved across reanalyze via user_edited_fields.
+    if "title" in body and isinstance(body["title"], str):
+        updates["title"] = body["title"][:500]
+    if "summary" in body and isinstance(body["summary"], str):
+        updates["summary"] = body["summary"]
+    if "user_summary" in body and isinstance(body["user_summary"], str):
+        updates["user_summary"] = body["user_summary"]
+    # Accept either urgency_reason (wire name used by JS) or urgency (column name).
+    # If both are supplied, urgency_reason takes precedence.
+    _urgency_in = body.get("urgency_reason", body.get("urgency"))
+    if isinstance(_urgency_in, str):
+        updates["urgency"] = _urgency_in
+    if "body_preview" in body and isinstance(body["body_preview"], str):
+        updates["body_preview"] = body["body_preview"]
+    if "hierarchy" in body and body["hierarchy"] in ("user", "project", "topic", "general"):
+        updates["hierarchy"] = body["hierarchy"]
+    if "goals" in body and isinstance(body["goals"], list):
+        updates["goals"] = json.dumps(body["goals"])
+    if "key_dates" in body and isinstance(body["key_dates"], list):
+        updates["key_dates"] = json.dumps(body["key_dates"])
+
     if not updates:
         raise HTTPException(status_code=400, detail="No valid fields to update.")
-    # Track which classification fields the user has manually edited so
-    # reanalysis preserves them instead of overwriting with LLM output.
-    _editable_fields = {"priority", "category", "project_tag", "is_passdown"}
+    # Track which fields the user has manually edited so reanalyze preserves them.
+    _editable_fields = {
+        "priority", "category", "project_tag", "is_passdown",
+        # Issue #85 additions:
+        "title", "summary", "user_summary", "urgency", "body_preview",
+        "hierarchy", "goals", "key_dates",
+    }
     with db.lock:
         old_record = db.get_item(item_id)
         if not old_record:
@@ -1721,18 +1751,49 @@ def create_todo(body: dict):
         data["deadline"] = body["deadline"]
     if body.get("project_tag"):
         data["project_tag"] = body["project_tag"]
-    if body.get("item_id"):
-        data["item_id"] = body["item_id"]
+    linked_item_id = body.get("item_id")
+    if linked_item_id:
+        data["item_id"] = linked_item_id
         with db.lock:
-            item = db.get_item(body["item_id"])
+            item = db.get_item(linked_item_id)
         if item:
             data["source"]      = item.get("source", "manual")
             data["title"]       = item.get("title", "")
             data["url"]         = item.get("url", "")
             data["project_tag"] = data.get("project_tag") or item.get("project_tag")
+        with db.lock:
+            doc_id = db.insert_todo(data)
+        return {"ok": True, "doc_id": doc_id}
+
+    # Manual card with no linked item — synthesize a placeholder items row so
+    # the detail panel, PATCH /analyses, and reanalyze-preservation mechanism
+    # all work for it uniformly.
     with db.lock:
         doc_id = db.insert_todo(data)
-    return {"ok": True, "doc_id": doc_id}
+        new_item_id = f"manual_{doc_id}"
+        db.upsert_item({
+            "item_id":      new_item_id,
+            "source":       "manual",
+            "direction":    "received",
+            "title":        description[:200],
+            "author":       "",
+            "timestamp":    now,
+            "url":          "",
+            "has_action":   1,
+            "priority":     priority,
+            "category":     "task",
+            "summary":      "",
+            "action_items": "[]",
+            "hierarchy":    "general",
+            "project_tag":  data.get("project_tag"),
+            "goals":        "[]",
+            "key_dates":    "[]",
+            "information_items": "[]",
+            "body_preview": "",
+            "references":   "[]",
+        })
+        db.update_todo(doc_id, {"item_id": new_item_id})
+    return {"ok": True, "doc_id": doc_id, "item_id": new_item_id}
 
 
 @app.get("/todos/assigned_count")

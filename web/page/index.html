@@ -702,18 +702,59 @@ tr.attn-low  { opacity:0.65; }
   background: var(--bg); border: 1px solid var(--border2); border-radius: var(--r);
   padding: 10px 12px; white-space: pre-wrap; word-break: break-word;
 }
+.detail-body-editor {
+  width: 100%;
+  min-height: 100px;
+  padding: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border2);
+  border-radius: var(--r);
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+}
+.detail-body-editor:focus { border-color: var(--accent); outline: none; }
+.detail-goals-list, .detail-dates-list { list-style: none; padding: 0; margin: 0 0 6px 0; }
+.detail-goal-row, .detail-date-row { display: flex; gap: 4px; align-items: center; margin-bottom: 4px; }
+.detail-goal-input, .detail-date-desc {
+  flex: 1; padding: 3px 7px; background: var(--bg);
+  border: 1px solid var(--border2); border-radius: var(--r);
+  color: var(--text); font-size: 11px;
+}
+.detail-date-input { padding: 3px 7px; background: var(--bg); border: 1px solid var(--border2); border-radius: var(--r); color: var(--text); font-size: 11px; }
+.detail-add-btn { font-size: 11px; padding: 3px 8px; color: var(--muted); }
+.detail-add-btn:hover { color: var(--accent); }
+.detail-title-input {
+  width: 100%; font-size: 14px; font-weight: 600;
+  padding: 3px 6px; background: transparent;
+  border: 1px solid transparent; border-radius: var(--r);
+  color: var(--text);
+}
+.detail-title-input:hover { border-color: var(--border2); }
+.detail-title-input:focus { border-color: var(--accent); outline: none; background: var(--bg); }
 .detail-list { list-style: none; padding: 0; }
 .detail-list li { font-size: 11px; color: var(--muted); padding: 4px 0; border-bottom: 1px solid var(--border); line-height: 1.45; }
 .detail-list li:last-child { border-bottom: none; }
 .detail-todo-row {
-  display: flex; align-items: flex-start; gap: 8px;
+  display: flex; align-items: center; gap: 4px;
   padding: 5px 0; border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
 }
 .detail-todo-row:last-child { border-bottom: none; }
-.detail-todo-row .cb { margin-top: 2px; }
+.detail-todo-row .cb { margin-top: 0; flex-shrink: 0; }
 .detail-todo-text { font-size: 11px; color: var(--text); line-height: 1.4; flex: 1; }
 .detail-todo-text.done { text-decoration: line-through; color: var(--muted); }
 .detail-todo-dl { font-size: 10px; color: var(--red); white-space: nowrap; }
+.detail-todo-desc-input {
+  flex: 2; min-width: 120px; padding: 3px 7px; background: var(--bg);
+  border: 1px solid var(--border2); border-radius: var(--r);
+  color: var(--text); font-size: 11px;
+}
+.detail-todo-dl-input {
+  padding: 3px 7px; background: var(--bg); border: 1px solid var(--border2);
+  border-radius: var(--r); color: var(--text); font-size: 11px;
+}
 .detail-edit {
   padding: 10px 18px; border-top: 1px solid var(--border2);
   display: flex; align-items: center; gap: 8px; flex-shrink: 0; flex-wrap: wrap;
@@ -1363,23 +1404,9 @@ tr.attn-low  { opacity:0.65; }
         <label class="show-done" id="showDoneLbl"><input type="checkbox" id="showDone" onchange="loadTodos()"> Show completed</label>
         <label class="show-done"><input type="checkbox" id="showHidden" onchange="onShowHidden()"> Show hidden</label>
         <label class="show-done" id="showResolvedLbl" style="display:none"><input type="checkbox" id="showResolved" onchange="onShowResolved()"> Show resolved</label>
-        <button class="ia" id="addActionBtn" onclick="toggleAddAction()" title="Add manual action item" style="margin-left:auto;padding:3px 9px;font-size:11px">+ Add action</button>
+        <button class="ia" id="addActionBtn" onclick="createManualCard()" title="Create a new manual card" style="margin-left:auto;padding:3px 9px;font-size:11px">+ New card</button>
         <button class="ia" id="regenerateBriefingBtn" onclick="regenerateBriefing()" title="Re-generate briefing with current data" style="display:none;margin-left:auto;padding:3px 9px;font-size:11px">↺ Regenerate</button>
         <button class="ia" id="passdownBtn" onclick="openPassdownModal()" title="Generate a shift-handoff passdown email" style="padding:3px 9px;font-size:11px">📋 Passdown</button>
-      </div>
-      <div id="addActionForm" style="display:none;padding:10px 14px;border-bottom:1px solid var(--border2);background:var(--surface);gap:8px;flex-wrap:wrap;align-items:flex-end" class="frow">
-        <input id="newTodoDesc"     type="text"   placeholder="Description…"  style="flex:2;min-width:180px;padding:4px 8px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:12px" onkeydown="if(event.key==='Enter')submitNewTodo()">
-        <input id="newTodoDeadline" type="date"   placeholder="Deadline"       style="padding:4px 8px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:12px">
-        <select id="newTodoPri" style="padding:4px 8px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:12px">
-          <option value="high">high</option>
-          <option value="medium" selected>medium</option>
-          <option value="low">low</option>
-        </select>
-        <select id="newTodoProj" style="padding:4px 8px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--text);font-size:12px">
-          <option value="">— no project —</option>
-        </select>
-        <button class="detail-save" onclick="submitNewTodo()" style="padding:4px 12px">Add</button>
-        <button class="ia" onclick="toggleAddAction()" style="padding:3px 8px;font-size:11px">Cancel</button>
       </div>
       <div id="todo-view"><div class="loading-placeholder"><div class="spinner-lg"></div><div>Loading action items…</div></div></div>
       <div id="intel-view"><div class="loading-placeholder"><div class="spinner-lg"></div><div>Loading intel…</div></div></div>
@@ -1680,6 +1707,16 @@ tr.attn-low  { opacity:0.65; }
       <dl class="help-kv">
         <dt>◈</dt><dd>Tag the item to a project. Opens a picker with all configured projects. Select a project to tag; the system learns keywords and senders from the item in the background.</dd>
         <dt>✕ noise</dt><dd>Mark the item as noise. Sets category to noise/low and teaches the noise filter its keywords so similar items are deprioritised in future scans.</dd>
+      </dl>
+    </div>
+
+    <div class="help-section">
+      <h3>Cards</h3>
+      <p>Todos open as <strong>cards</strong> in the right-hand detail panel. Manual and LLM-generated cards share the same editable surface — title, summary, body/notes, priority, category, project tag, goals, key dates, linked tasks, and "why this priority" are all editable inline.</p>
+      <dl class="help-kv">
+        <dt>+ New card</dt><dd>Creates a blank manual card and opens it in the detail panel. Manual cards are skipped by reanalysis.</dd>
+        <dt>Edit protection</dt><dd>Fields you edit on a generated card are recorded in <code>user_edited_fields</code> and preserved when the LLM reanalyses the underlying item.</dd>
+        <dt>Linked tasks</dt><dd>The Tasks list on a card is the authoritative set of todos tied to that card. Add, rename, or delete tasks from the card; changes appear in the main Todos list.</dd>
       </dl>
     </div>
 
@@ -2500,36 +2537,20 @@ async function toggleDone(id, done) {
   }
 }
 
-function toggleAddAction() {
-  const form = $('addActionForm');
-  const visible = form.style.display !== 'none';
-  form.style.display = visible ? 'none' : 'flex';
-  if (!visible) {
-    // Populate project dropdown from current project list
-    const sel = $('newTodoProj');
-    sel.innerHTML = '<option value="">— no project —</option>' +
-      allProjects.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
-    $('newTodoDesc').focus();
-  }
-}
-
-async function submitNewTodo() {
-  const desc = ($('newTodoDesc').value || '').trim();
-  if (!desc) { $('newTodoDesc').focus(); return; }
-  const body = {
-    description: desc,
-    priority:    $('newTodoPri').value,
-    deadline:    $('newTodoDeadline').value || undefined,
-    project_tag: $('newTodoProj').value    || undefined,
-  };
+async function createManualCard() {
   try {
-    await api('/todos', 'POST', body);
-    $('newTodoDesc').value = '';
-    $('newTodoDeadline').value = '';
-    $('addActionForm').style.display = 'none';
-    await loadTodos();
-    loadStats();
-  } catch(e) { $('statusMsg').textContent = 'Failed: ' + e.message; }
+    const resp = await api('/todos', 'POST', {
+      description: 'new card',
+      priority:    'medium',
+    });
+    // Best-effort cache refresh; a failed reload must not mask the successful POST.
+    await Promise.allSettled([loadTodos(), loadItems()]);
+    const newItemId = resp.item_id || `manual_${resp.doc_id}`;
+    openTodoDetail(newItemId);
+    if (typeof loadStats === 'function') loadStats();
+  } catch (e) {
+    $('statusMsg').textContent = 'Failed to create card: ' + e.message;
+  }
 }
 
 async function saveTodoEdit(docId) {
@@ -4045,7 +4066,13 @@ function detailRow(label, value) {
 
 function openDetail(item) {
   if (!item) return;
-  $('detailTitle').textContent = item.title || '(no title)';
+  const titleEl = $('detailTitle');
+  titleEl.innerHTML = `
+    <input type="text" class="detail-title-input"
+           data-item-id="${esc(item.item_id)}"
+           value="${esc(item.title || '')}"
+           placeholder="(no title)"
+           onblur="saveDetailField(this,'title')">`;
 
   // Record opened action for attention model (fire-and-forget)
   if (!_attentionColdStart) {
@@ -4063,36 +4090,59 @@ function openDetail(item) {
     item.is_replied   ? `<span class="badge" style="background:rgba(64,184,255,.08);border:1px solid rgba(64,184,255,.2);color:var(--blue)">↩ replied</span>` : '',
   ].filter(Boolean).join('');
 
+  const isManual = item.source === 'manual';
   const meta = [
-    item.author   ? detailRow('From', esc(item.author))   : '',
-    item.to_field ? detailRow('To',   esc(item.to_field)) : '',
-    item.cc_field ? detailRow('CC',   esc(item.cc_field)) : '',
-    item.timestamp  ? detailRow('Time', new Date(item.timestamp).toLocaleString()) : '',
-    item.replied_at ? detailRow('Replied', new Date(item.replied_at).toLocaleString()) : '',
+    (!isManual && item.author)   ? detailRow('From', esc(item.author))   : '',
+    (!isManual && item.to_field) ? detailRow('To',   esc(item.to_field)) : '',
+    (!isManual && item.cc_field) ? detailRow('CC',   esc(item.cc_field)) : '',
+    item.timestamp  ? detailRow('Created', new Date(item.timestamp).toLocaleString()) : '',
+    (!isManual && item.replied_at) ? detailRow('Replied', new Date(item.replied_at).toLocaleString()) : '',
   ].filter(Boolean).join('');
 
-  const summary = item.summary ? `
+  const summary = `
     <div class="detail-section">
       <div class="detail-label">Summary</div>
-      <div class="detail-value">${esc(item.summary)}</div>
-    </div>` : '';
+      <textarea class="detail-body-editor" rows="2"
+                data-item-id="${esc(item.item_id)}"
+                placeholder="one-line summary"
+                onblur="saveDetailField(this,'summary')"
+      >${esc(item.summary || '')}</textarea>
+    </div>`;
 
-  const urgency = item.urgency_reason ? `
+  const urgencyText = item.urgency || item.urgency_reason || '';
+  const urgency = `
     <div class="detail-section">
       <div class="detail-label">Why This Priority</div>
-      <div class="detail-value" style="color:var(--muted);font-size:11px">${esc(item.urgency_reason)}</div>
-    </div>` : '';
+      <textarea class="detail-body-editor" rows="2"
+                data-item-id="${esc(item.item_id)}"
+                placeholder="why this matters"
+                onblur="saveDetailField(this,'urgency')"
+      >${esc(urgencyText)}</textarea>
+    </div>`;
 
-  const bodyText = item.body_preview ? `
+  // Issue #85: editable body. For manual cards, this is the primary notes
+  // surface. For generated cards, it seeds from the email body_preview and
+  // can be annotated; edits are preserved across reanalyze (user_edited_fields).
+  const bodyLabel = isManual ? 'Notes' : 'Content';
+  const bodyText = `
     <div class="detail-section">
-      <div class="detail-label">Content</div>
-      <div class="detail-body-text">${esc(item.body_preview)}</div>
-    </div>` : '';
+      <div class="detail-label">${bodyLabel}</div>
+      <textarea id="detailBody_body_preview"
+                class="detail-body-editor"
+                rows="6"
+                data-item-id="${esc(item.item_id)}"
+                placeholder="${isManual ? 'Write notes about this card…' : ''}"
+                onblur="saveDetailField(this,'body_preview')"
+      >${esc(item.body_preview || '')}</textarea>
+    </div>`;
 
-  // Show live todos (with checkboxes) instead of static action_items
+  // Issue #85: editable linked-todo list. Every card (manual or generated)
+  // shows its Tasks section with inline add/edit/delete controls. The LLM's
+  // static action_items array is no longer rendered — the live todos table
+  // is the single source of truth.
   const linkedTodos = allTodos.filter(t => t.item_id === item.item_id);
-  const actions = linkedTodos.length ? `
-    <div class="detail-section" id="detailTodosSection">
+  const actions = `
+    <div class="detail-section" id="detailTodosSection" data-item-id="${esc(item.item_id)}">
       <div class="detail-label">Tasks</div>
       ${linkedTodos.map(t => {
         const st = t.status || (t.done ? 'done' : 'open');
@@ -4105,34 +4155,58 @@ function openDetail(item) {
           ? `<span style="color:var(--blue);font-size:10px;margin-left:4px">⇒ ${esc(t.assigned_to)}</span>` : '';
         const assignBtn = st !== 'done'
           ? `<button class="ia" onclick="showAssignPicker(${t.doc_id},'${esc(item.item_id)}',this)" title="Assign">⇒</button>` : '';
+        const dlVal = t.deadline || '';
         return `
-        <div class="detail-todo-row">
+        <div class="detail-todo-row" data-doc-id="${t.doc_id}">
           <button class="cb" ${cbStyle} onclick="${cbClick}">${cbContent}</button>
-          <div class="detail-todo-text${st === 'done' ? ' done' : ''}">${esc(t.description)}${assignedInfo}${t.deadline ? ` <span class="detail-todo-dl">⚑ ${fmtDate(t.deadline)}</span>` : ''}</div>
-          ${assignBtn ? `<div style="flex-shrink:0">${assignBtn}</div>` : ''}
+          <input type="text" class="detail-todo-desc-input"
+                 value="${esc(t.description)}"
+                 data-doc-id="${t.doc_id}"
+                 onblur="saveLinkedTodoField(this,'description')">
+          <input type="date" class="detail-todo-dl-input" value="${dlVal}"
+                 data-doc-id="${t.doc_id}"
+                 onblur="saveLinkedTodoField(this,'deadline')">
+          ${assignedInfo}
+          ${assignBtn}
+          <button class="ia" onclick="deleteLinkedTodo(${t.doc_id},'${esc(item.item_id)}')" title="Remove task">✕</button>
         </div>`;
       }).join('')}
-    </div>` : (item.action_items || []).length ? `
-    <div class="detail-section">
-      <div class="detail-label">Action Items</div>
-      <ul class="detail-list">${(item.action_items || []).map(a =>
-        `<li><strong>${esc(a.description)}</strong>${a.deadline ? ` <span style="color:var(--red)">⚑ ${esc(a.deadline)}</span>` : ''}${a.owner && a.owner !== 'me' ? ` → ${esc(a.owner)}` : ''}</li>`
-      ).join('')}</ul>
-    </div>` : '';
+      <button class="ia detail-add-btn" onclick="addLinkedTodo('${esc(item.item_id)}')">+ Add task</button>
+    </div>`;
 
-  const goals = (item.goals || []).length ? `
-    <div class="detail-section">
+  const goalsList = Array.isArray(item.goals) ? item.goals : [];
+  const goals = `
+    <div class="detail-section" data-item-id="${esc(item.item_id)}">
       <div class="detail-label">Goals</div>
-      <ul class="detail-list">${(item.goals || []).map(g => `<li>${esc(g)}</li>`).join('')}</ul>
-    </div>` : '';
+      <ul class="detail-goals-list">
+        ${goalsList.map((g, i) => `
+          <li class="detail-goal-row" data-idx="${i}">
+            <input type="text" class="detail-goal-input" value="${esc(g)}"
+                   onblur="saveGoalEdit('${esc(item.item_id)}', ${i}, this.value)">
+            <button class="ia" onclick="removeGoal('${esc(item.item_id)}', ${i})" title="Remove">✕</button>
+          </li>
+        `).join('')}
+      </ul>
+      <button class="ia detail-add-btn" onclick="addGoal('${esc(item.item_id)}')">+ Add goal</button>
+    </div>`;
 
-  const dates = (item.key_dates || []).length ? `
-    <div class="detail-section">
+  const kdList = Array.isArray(item.key_dates) ? item.key_dates : [];
+  const dates = `
+    <div class="detail-section" data-item-id="${esc(item.item_id)}">
       <div class="detail-label">Key Dates</div>
-      <ul class="detail-list">${(item.key_dates || []).map(d =>
-        `<li>${d.date ? `<strong>${esc(String(d.date))}</strong> — ` : ''}${esc(d.description || '')}</li>`
-      ).join('')}</ul>
-    </div>` : '';
+      <ul class="detail-dates-list">
+        ${kdList.map((d, i) => `
+          <li class="detail-date-row" data-idx="${i}">
+            <input type="date" class="detail-date-input" value="${esc(d.date || '')}"
+                   onblur="saveKeyDateEdit('${esc(item.item_id)}', ${i}, 'date', this.value)">
+            <input type="text" class="detail-date-desc" value="${esc(d.description || '')}" placeholder="what's happening"
+                   onblur="saveKeyDateEdit('${esc(item.item_id)}', ${i}, 'description', this.value)">
+            <button class="ia" onclick="removeKeyDate('${esc(item.item_id)}', ${i})" title="Remove">✕</button>
+          </li>
+        `).join('')}
+      </ul>
+      <button class="ia detail-add-btn" onclick="addKeyDate('${esc(item.item_id)}')">+ Add date</button>
+    </div>`;
 
   $('detailBody').innerHTML = `
     <div class="detail-badges">${badges}</div>
@@ -4167,9 +4241,11 @@ function openDetail(item) {
     <button class="detail-save" onclick="saveDetailEdits('${esc(item.item_id)}')">Save</button>
     <span class="detail-save-msg" id="detailSaveMsg"></span>`;
 
-  const openLink = item.url
-    ? `<a href="${esc(item.url)}" target="_blank" class="connect-btn" style="text-decoration:none">↗ Open in ${item.source}</a>`
-    : '<span style="font-size:11px;color:var(--muted)">No source link</span>';
+  const openLink = isManual
+    ? '<span style="font-size:11px;color:var(--muted)">Manual card</span>'
+    : (item.url
+        ? `<a href="${esc(item.url)}" target="_blank" class="connect-btn" style="text-decoration:none">↗ Open in ${item.source}</a>`
+        : '<span style="font-size:11px;color:var(--muted)">No source link</span>');
   $('detailFoot').innerHTML = openLink;
 
   $('detailPanel').classList.add('open');
@@ -4339,6 +4415,129 @@ async function saveDetailEdits(itemId) {
     msg.style.color = 'var(--red)';
     msg.textContent = 'Failed';
     setTimeout(() => { msg.textContent = ''; msg.style.color = ''; }, 3000);
+  }
+}
+
+async function saveDetailField(el, fieldName) {
+  const itemId = el.dataset.itemId || el.closest('[data-item-id]')?.dataset.itemId;
+  if (!itemId) return;
+  const value = el.value;
+  try {
+    await api(`/analyses/${encodeURIComponent(itemId)}`, 'PATCH', { [fieldName]: value });
+    const analysis = findAnalysis(itemId);
+    if (analysis) analysis[fieldName] = value;
+  } catch (e) {
+    console.warn(`saveDetailField(${fieldName}):`, e);
+  }
+}
+
+async function _patchGoals(itemId, newGoals) {
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  try {
+    await api(`/analyses/${encodeURIComponent(itemId)}`, 'PATCH', { goals: newGoals });
+    analysis.goals = newGoals;
+  } catch (e) {
+    console.warn('_patchGoals:', e);
+  }
+}
+async function addGoal(itemId) {
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  const goals = [...(analysis.goals || []), ''];
+  await _patchGoals(itemId, goals);
+  openDetail(analysis); // re-render
+}
+async function removeGoal(itemId, idx) {
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  const goals = [...(analysis.goals || [])];
+  goals.splice(idx, 1);
+  await _patchGoals(itemId, goals);
+  openDetail(analysis);
+}
+async function saveGoalEdit(itemId, idx, value) {
+  // No re-render: blur fires on every keystroke-leave; preserving focus matters.
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  const goals = [...(analysis.goals || [])];
+  goals[idx] = value;
+  await _patchGoals(itemId, goals);
+}
+
+async function _patchKeyDates(itemId, newList) {
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  try {
+    await api(`/analyses/${encodeURIComponent(itemId)}`, 'PATCH', { key_dates: newList });
+    analysis.key_dates = newList;
+  } catch (e) {
+    console.warn('_patchKeyDates:', e);
+  }
+}
+async function addKeyDate(itemId) {
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  const list = [...(analysis.key_dates || []), { date: '', description: '' }];
+  await _patchKeyDates(itemId, list);
+  openDetail(analysis);
+}
+async function removeKeyDate(itemId, idx) {
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  const list = [...(analysis.key_dates || [])];
+  list.splice(idx, 1);
+  await _patchKeyDates(itemId, list);
+  openDetail(analysis);
+}
+async function saveKeyDateEdit(itemId, idx, field, value) {
+  // No re-render: blur fires on every input-leave; preserving focus matters.
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  const list = [...(analysis.key_dates || [])];
+  list[idx] = { ...list[idx], [field]: value };
+  await _patchKeyDates(itemId, list);
+}
+
+// Issue #85: linked-todo CRUD inside the card detail panel.
+async function addLinkedTodo(itemId) {
+  try {
+    await api('/todos', 'POST', {
+      description: 'new task',
+      priority: 'medium',
+      item_id: itemId,
+    });
+    // Refetch todos into the cache and re-render the panel.
+    allTodos = await api('/todos');
+    const analysis = findAnalysis(itemId);
+    if (analysis) openDetail(analysis);
+    if (typeof loadStats === 'function') loadStats();
+  } catch (e) {
+    console.warn('addLinkedTodo:', e);
+  }
+}
+
+async function saveLinkedTodoField(el, fieldName) {
+  const docId = Number(el.dataset.docId);
+  const value = fieldName === 'deadline' ? (el.value || null) : el.value;
+  try {
+    await api(`/todos/${docId}`, 'PATCH', { [fieldName]: value });
+    const idx = allTodos.findIndex(t => t.doc_id === docId);
+    if (idx >= 0) allTodos[idx] = { ...allTodos[idx], [fieldName]: value };
+  } catch (e) {
+    console.warn('saveLinkedTodoField:', e);
+  }
+}
+
+async function deleteLinkedTodo(docId, itemId) {
+  try {
+    await api(`/todos/${docId}`, 'DELETE');
+    allTodos = allTodos.filter(t => t.doc_id !== docId);
+    const analysis = findAnalysis(itemId);
+    if (analysis) openDetail(analysis);
+    if (typeof loadStats === 'function') loadStats();
+  } catch (e) {
+    console.warn('deleteLinkedTodo:', e);
   }
 }
 

@@ -809,3 +809,239 @@ def test_save_analysis_assigns_delegated_owner_to_assigned_tab():
     assert t["owner"] == "Anna Simonitis"
     assert t["status"] == "assigned", t
     assert t["assigned_to"] == "anna.simonitis@universalorlando.com"
+
+
+class TestManualTodoMigration:
+    """Migration backfills items rows for pre-existing manual todos
+    (is_manual=1, item_id IS NULL). The backfill sets item_id='manual_<todo_id>'
+    on both the todo and the synthesized items row so the UI's
+    openTodoDetail() → GET /analyses/{item_id} path works for them."""
+
+    def test_backfill_creates_items_row_for_orphan_manual_todo(self, client):
+        import db as _db
+        # Insert a legacy manual todo bypassing the new POST handler so we
+        # simulate the pre-migration schema state.
+        with _db.lock:
+            tid = _db.insert_todo({
+                "description": "legacy manual todo",
+                "priority":    "medium",
+                "is_manual":   1,
+                "done":        0,
+                "status":      "open",
+                "source":      "manual",
+                "title":       "",
+                "url":         "",
+                "owner":       "me",
+                "created_at":  "2026-04-20T00:00:00+00:00",
+                "item_id":     None,
+            })
+        # Invoke the backfill migration directly.
+        with _db.lock:
+            _db.backfill_manual_todo_items()
+        # Todo should now carry an item_id pointing at the synthesized row.
+        with _db.lock:
+            row = _db.conn().execute(
+                "SELECT item_id FROM todos WHERE id = ?", (tid,)
+            ).fetchone()
+        assert row["item_id"] == f"manual_{tid}"
+        with _db.lock:
+            item = _db.get_item(f"manual_{tid}")
+        assert item is not None
+        assert item["source"] == "manual"
+        assert item["title"]  == "legacy manual todo"
+        assert item["has_action"] == 1
+
+    def test_backfill_is_idempotent(self, client):
+        import db as _db
+        with _db.lock:
+            tid = _db.insert_todo({
+                "description": "another legacy", "priority": "low",
+                "is_manual": 1, "done": 0, "status": "open",
+                "source": "manual", "title": "", "url": "", "owner": "me",
+                "created_at": "2026-04-20T00:00:00+00:00", "item_id": None,
+            })
+        with _db.lock:
+            _db.backfill_manual_todo_items()
+            _db.backfill_manual_todo_items()  # second call must be a no-op
+        with _db.lock:
+            count = _db.conn().execute(
+                "SELECT COUNT(*) FROM items WHERE item_id = ?",
+                (f"manual_{tid}",),
+            ).fetchone()[0]
+        assert count == 1
+
+    def test_backfill_skips_non_manual_todos(self, client):
+        import db as _db
+        # A generated todo already has item_id set; migration should not touch it.
+        with _db.lock:
+            _db.upsert_item({
+                "item_id": "real_item_1", "source": "outlook",
+                "title": "real email", "body_preview": "hello",
+            })
+            _db.insert_todo({
+                "description": "generated", "priority": "medium",
+                "is_manual": 0, "done": 0, "status": "open",
+                "source": "outlook", "title": "real email", "url": "",
+                "owner": "me", "created_at": "2026-04-20T00:00:00+00:00",
+                "item_id": "real_item_1",
+            })
+            _db.backfill_manual_todo_items()
+            count = _db.conn().execute(
+                "SELECT COUNT(*) FROM items WHERE item_id LIKE 'manual_%'"
+            ).fetchone()[0]
+        assert count == 0
+
+
+class TestManualTodoCreationSynthesizesItem:
+    """POST /todos with no item_id must create a placeholder items row
+    so the card opens in the detail panel like a generated card."""
+
+    def test_post_todos_creates_items_row(self, client):
+        resp = client.post("/todos", json={
+            "description": "prep for Friday meeting",
+            "priority":    "high",
+            "project_tag": None,
+        })
+        assert resp.status_code == 200
+        doc_id = resp.json()["doc_id"]
+
+        import db as _db
+        with _db.lock:
+            todo_row = _db.conn().execute(
+                "SELECT item_id FROM todos WHERE id = ?", (doc_id,)
+            ).fetchone()
+        assert todo_row["item_id"] == f"manual_{doc_id}"
+
+        with _db.lock:
+            item = _db.get_item(f"manual_{doc_id}")
+        assert item is not None
+        assert item["source"]     == "manual"
+        assert item["title"]      == "prep for Friday meeting"
+        assert item["priority"]   == "high"
+        assert item["has_action"] == 1
+        assert item["category"]   == "task"
+
+    def test_post_todos_with_item_id_does_not_synthesize(self, client):
+        import db as _db
+        with _db.lock:
+            _db.upsert_item({
+                "item_id": "real_a", "source": "outlook",
+                "title": "real email", "body_preview": "hi",
+            })
+        resp = client.post("/todos", json={
+            "description": "manual child of real email",
+            "priority":    "medium",
+            "item_id":     "real_a",
+        })
+        assert resp.status_code == 200
+        doc_id = resp.json()["doc_id"]
+        with _db.lock:
+            todo_row = _db.conn().execute(
+                "SELECT item_id FROM todos WHERE id = ?", (doc_id,)
+            ).fetchone()
+        # Must be the real item_id, not manual_<doc_id>.
+        assert todo_row["item_id"] == "real_a"
+        # No spurious manual_* row was created.
+        with _db.lock:
+            count = _db.conn().execute(
+                "SELECT COUNT(*) FROM items WHERE item_id LIKE 'manual_%'"
+            ).fetchone()[0]
+        assert count == 0
+
+
+class TestPatchAnalysisRichFields:
+    """Issue #85: PATCH /analyses/{item_id} must accept the content-level
+    fields (summary, urgency_reason, body_preview, goals, key_dates,
+    hierarchy, title, user_summary) and record them in user_edited_fields
+    so reanalyze preserves them."""
+
+    def _seed(self):
+        import db as _db
+        with _db.lock:
+            _db.upsert_item({
+                "item_id":      "edit_me",
+                "source":       "manual",
+                "title":        "original title",
+                "summary":      "original summary",
+                "urgency":      "original urgency",
+                "body_preview": "original body",
+                "goals":        "[]",
+                "key_dates":    "[]",
+                "hierarchy":    "general",
+                "priority":     "medium",
+                "category":     "task",
+                "has_action":   1,
+            })
+
+    def test_patch_accepts_summary(self, client):
+        self._seed()
+        resp = client.patch("/analyses/edit_me", json={"summary": "new summary"})
+        assert resp.status_code == 200
+        import db as _db
+        with _db.lock:
+            row = _db.get_item("edit_me")
+        assert row["summary"] == "new summary"
+        import json as _json
+        assert "summary" in _json.loads(row["user_edited_fields"])
+
+    def test_patch_accepts_body_preview(self, client):
+        self._seed()
+        resp = client.patch("/analyses/edit_me",
+                            json={"body_preview": "free-form notes here"})
+        assert resp.status_code == 200
+        import db as _db
+        with _db.lock:
+            row = _db.get_item("edit_me")
+        assert row["body_preview"] == "free-form notes here"
+        import json as _json
+        assert "body_preview" in _json.loads(row["user_edited_fields"])
+
+    def test_patch_accepts_goals_list(self, client):
+        self._seed()
+        resp = client.patch("/analyses/edit_me",
+                            json={"goals": ["draft proposal", "review metrics"]})
+        assert resp.status_code == 200
+        import db as _db, json as _json
+        with _db.lock:
+            row = _db.get_item("edit_me")
+        assert _json.loads(row["goals"]) == ["draft proposal", "review metrics"]
+        assert "goals" in _json.loads(row["user_edited_fields"])
+
+    def test_patch_accepts_key_dates_list(self, client):
+        self._seed()
+        payload = [
+            {"date": "2026-05-01", "description": "submit draft"},
+            {"date": "2026-05-15", "description": "review"},
+        ]
+        resp = client.patch("/analyses/edit_me", json={"key_dates": payload})
+        assert resp.status_code == 200
+        import db as _db, json as _json
+        with _db.lock:
+            row = _db.get_item("edit_me")
+        assert _json.loads(row["key_dates"]) == payload
+        assert "key_dates" in _json.loads(row["user_edited_fields"])
+
+    def test_patch_accepts_title_urgency_hierarchy_user_summary(self, client):
+        self._seed()
+        resp = client.patch("/analyses/edit_me", json={
+            "title":          "new title",
+            "urgency_reason": "needs reply today",
+            "hierarchy":      "project",
+            "user_summary":   "my note",
+        })
+        assert resp.status_code == 200
+        import db as _db, json as _json
+        with _db.lock:
+            row = _db.get_item("edit_me")
+        assert row["title"]        == "new title"
+        assert row["urgency"]      == "needs reply today"
+        assert row["hierarchy"]    == "project"
+        assert row["user_summary"] == "my note"
+        edited = set(_json.loads(row["user_edited_fields"]))
+        assert {"title", "urgency", "hierarchy", "user_summary"} <= edited
+
+    def test_patch_rejects_unknown_fields(self, client):
+        """Body with only unknown keys still returns 400, behaviour unchanged."""
+        self._seed()
+        resp = client.patch("/analyses/edit_me", json={"bogus": "value"})
+        assert resp.status_code == 400

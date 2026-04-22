@@ -513,6 +513,9 @@ def run_reanalyze() -> None:
         with db.lock:
             all_records = db.get_all_items()
 
+        # Manual cards have no source to re-extract from (issue #85).
+        all_records = [r for r in all_records if r.get("source") != "manual"]
+
         # Priority ordering: user > project > topic > general.
         # Within each tier: passdowns first (richest operational context),
         # then newest items first by timestamp.

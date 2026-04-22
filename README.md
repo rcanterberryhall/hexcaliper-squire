@@ -468,6 +468,12 @@ Add to crontab:
 
 Both sidecars POST to `/page/api/ingest`. The API deduplicates by message ID so re-running is safe.
 
+## Cards
+
+Todos appear as **cards** in the right-hand detail panel. Every card — manual or LLM-generated — exposes the same editable surface: title, summary, body/notes, priority, category, project tag, goals, key dates, linked tasks, and "why this priority". Edits on generated cards are preserved across reanalysis via `user_edited_fields`.
+
+Click **+ New card** in the Todos toolbar to create a manual card. A blank card is inserted (`source='manual'`, `item_id='manual_<doc_id>'`) and the detail panel opens straight into editing. Manual cards are skipped by the reanalyze orchestrator, so the LLM never touches them.
+
 ## Look-ahead board
 
 A two-week planning view that sits alongside todos, situations, and intel. Each project gets its own 14-day board anchored to a Sun–Sat calendar week — the window always covers two full calendar weeks and can be paged back/forward in 2-week increments via the `◀ Today ▶` toolbar controls. A global overview rolls up every project sorted by the earliest card start. Cards are UUID-keyed, carry a status (`planned`, `in_progress`, `done`, `blocked`), optional assignee, start/end date + shift, and three kinds of relations:

@@ -243,18 +243,11 @@ Click the **✎** (pencil) button on a todo row to edit:
 - Priority
 - Project tag
 
-### Creating a manual todo
+### Creating a manual card
 
-Click **+ Add action** at the top of the Todos panel. Fill in:
+Click **+ New card** at the top of the Todos panel. A blank manual card is created and the detail panel opens for editing: title, summary, body/notes, priority, project tag, goals, key dates, linked tasks, and "why this priority" are all editable inline.
 
-| Field | Required | Notes |
-|-------|----------|-------|
-| Description | Yes | Free text — what needs doing |
-| Priority | No | Defaults to `medium` |
-| Deadline | No | ISO date `YYYY-MM-DD` |
-| Project | No | Must match a configured project name |
-
-Manual todos are flagged with `is_manual=1` and are not affected by re-analysis.
+Manual cards are flagged with `source='manual'` and are skipped by re-analysis, so manual content is never overwritten by the LLM.
 
 ### Deleting a todo
 

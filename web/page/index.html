@@ -2545,7 +2545,8 @@ async function createManualCard() {
     // Best-effort cache refresh; a failed reload must not mask the successful POST.
     await Promise.allSettled([loadTodos(), loadItems()]);
     const newItemId = resp.item_id || `manual_${resp.doc_id}`;
-    openTodoDetail(newItemId);
+    await openTodoDetail(newItemId);
+    document.querySelector('.detail-title-input')?.select();
     if (typeof loadStats === 'function') loadStats();
   } catch (e) {
     $('statusMsg').textContent = 'Failed to create card: ' + e.message;

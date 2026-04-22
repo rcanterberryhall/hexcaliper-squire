@@ -4170,13 +4170,23 @@ function openDetail(item) {
       <button class="ia detail-add-btn" onclick="addGoal('${esc(item.item_id)}')">+ Add goal</button>
     </div>`;
 
-  const dates = (item.key_dates || []).length ? `
-    <div class="detail-section">
+  const kdList = Array.isArray(item.key_dates) ? item.key_dates : [];
+  const dates = `
+    <div class="detail-section" data-item-id="${esc(item.item_id)}">
       <div class="detail-label">Key Dates</div>
-      <ul class="detail-list">${(item.key_dates || []).map(d =>
-        `<li>${d.date ? `<strong>${esc(String(d.date))}</strong> — ` : ''}${esc(d.description || '')}</li>`
-      ).join('')}</ul>
-    </div>` : '';
+      <ul class="detail-dates-list">
+        ${kdList.map((d, i) => `
+          <li class="detail-date-row" data-idx="${i}">
+            <input type="date" class="detail-date-input" value="${esc(d.date || '')}"
+                   onblur="saveKeyDateEdit('${esc(item.item_id)}', ${i}, 'date', this.value)">
+            <input type="text" class="detail-date-desc" value="${esc(d.description || '')}" placeholder="what's happening"
+                   onblur="saveKeyDateEdit('${esc(item.item_id)}', ${i}, 'description', this.value)">
+            <button class="ia" onclick="removeKeyDate('${esc(item.item_id)}', ${i})" title="Remove">✕</button>
+          </li>
+        `).join('')}
+      </ul>
+      <button class="ia detail-add-btn" onclick="addKeyDate('${esc(item.item_id)}')">+ Add date</button>
+    </div>`;
 
   $('detailBody').innerHTML = `
     <div class="detail-badges">${badges}</div>
@@ -4433,6 +4443,40 @@ async function saveGoalEdit(itemId, idx, value) {
   const goals = [...(analysis.goals || [])];
   goals[idx] = value;
   await _patchGoals(itemId, goals);
+}
+
+async function _patchKeyDates(itemId, newList) {
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  try {
+    await api(`/analyses/${encodeURIComponent(itemId)}`, 'PATCH', { key_dates: newList });
+    analysis.key_dates = newList;
+  } catch (e) {
+    console.warn('_patchKeyDates:', e);
+  }
+}
+async function addKeyDate(itemId) {
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  const list = [...(analysis.key_dates || []), { date: '', description: '' }];
+  await _patchKeyDates(itemId, list);
+  openDetail(analysis);
+}
+async function removeKeyDate(itemId, idx) {
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  const list = [...(analysis.key_dates || [])];
+  list.splice(idx, 1);
+  await _patchKeyDates(itemId, list);
+  openDetail(analysis);
+}
+async function saveKeyDateEdit(itemId, idx, field, value) {
+  // No re-render: blur fires on every input-leave; preserving focus matters.
+  const analysis = findAnalysis(itemId);
+  if (!analysis) return;
+  const list = [...(analysis.key_dates || [])];
+  list[idx] = { ...list[idx], [field]: value };
+  await _patchKeyDates(itemId, list);
 }
 
 function closeDetail() {

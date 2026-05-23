@@ -83,6 +83,7 @@ All credentials can be set in `docker-compose.yml` under the `page-api` environm
 | `OLLAMA_URL`       | Ollama API endpoint (default: `http://host.docker.internal:11400/api/generate`)  |
 | `OLLAMA_MODEL`     | Model for extraction (default: `qwen3:32b`)                                     |
 | `MERLLM_URL`       | merLLM base URL for batch jobs (default: `http://host.docker.internal:11400`)    |
+| `LANCELLMOT_URL`   | lancellmot base URL for document linking (default: `http://host.docker.internal:8080`) |
 | `LOOKBACK_HOURS`   | Hours of history per scan (default: `48`)                                        |
 | `CREDENTIALS_KEY`  | Passphrase for Fernet encryption of OAuth tokens at rest. Leave unset for plaintext (backward compatible). Changing this key after tokens are stored makes them unreadable. |
 
@@ -513,6 +514,33 @@ Cards can reach into the rest of Parsival's information stream:
 - **Filters.** The toolbar gained a "with external links" / "no linked context" filter so you can either focus on cards that already have their paperwork attached or hunt for the ones still waiting to be annotated.
 
 Jira sprint bridging (surfacing Jira issues on the board directly) is on hold until a Jira ingest path lands — until then, accepted item-links are the entry point for Jira-sourced context.
+
+## lancellmot document linking
+
+Situation cards surface a chip linking to related documents in
+[lancellmot](https://github.com/rcanterberryhall/hexcaliper-lanceLLMot), the
+ecosystem's document assistant. Resolution is through an explicit alias table —
+each Parsival project is mapped by hand to a lancellmot project in
+**Settings → Projects**. There is no fuzzy matching; the friction of mapping is
+the forcing function that keeps project naming disciplined.
+
+- **Setup.** Point `LANCELLMOT_URL` at your lancellmot instance (default
+  `http://host.docker.internal:8080`).
+- **Mapping.** Open Settings → Projects and pick a lancellmot project from the
+  dropdown on each project row. The choice persists immediately.
+- **Resolved chip.** A situation tagged with a mapped project shows a chip with
+  the document count; hover it for a popover listing the top filenames.
+- **Unmapped chip.** A tag with no mapping shows a dashed `Map →` chip; clicking
+  it opens Settings focused on that project row.
+- **Unreachable chip.** If lancellmot can't be reached the chip renders amber
+  with an `⚠ unreachable` label — failures are loud, never silent. Click to
+  retry.
+
+The chip popover lists filenames for context. Deep-linking into lancellmot's
+document viewer is gated behind an optional `window.LANCELLMOT_WEB_URL` global:
+when a browser-facing lancellmot URL is configured, the popover gains an
+"Open lancellmot →" link; otherwise filenames render as plain text so the chip
+never points at a route that doesn't exist.
 
 ## Seed workflow
 

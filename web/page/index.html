@@ -494,7 +494,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .project-picker button:hover { background: var(--border); color: var(--accent); }
 .project-picker .no-projects { font-size: 10px; color: var(--muted); padding: 5px 9px; }
 .project-row {
-  display: grid; grid-template-columns: 1fr 1.5fr 1fr 1fr auto; gap: 6px; align-items: start;
+  display: grid; grid-template-columns: 1fr 1.5fr 1fr 1fr 1fr auto; gap: 6px; align-items: start;
   margin-bottom: 8px;
 }
 .project-row input, .project-row textarea, .project-row select {
@@ -506,9 +506,10 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .project-row input:focus, .project-row textarea:focus, .project-row select:focus { border-color: var(--accent); }
 .project-row select { appearance: none; cursor: pointer; }
 .project-row-head {
-  display: grid; grid-template-columns: 1fr 1.5fr 1fr 1fr auto; gap: 6px;
+  display: grid; grid-template-columns: 1fr 1.5fr 1fr 1fr 1fr auto; gap: 6px;
   margin-bottom: 4px;
 }
+.lmot-select { max-width: 100%; }
 .project-row-head span { font-size: 9px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); padding: 0 2px; }
 .learned-panel {
   grid-column: 1 / -1;
@@ -583,6 +584,29 @@ body { background: var(--bg); color: var(--text); font-family: var(--mono); font
 .situation-card.score-high     { border-color: var(--amber); border-left-width: 3px; }
 .situation-card.score-medium   { border-color: var(--accent); }
 .situation-card.score-low      { border-color: var(--border); }
+.lmot-chip-host { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.lmot-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; padding: 2px 7px; border-radius: 10px;
+  border: 1px solid var(--border2); background: rgba(64,184,255,0.08);
+  color: var(--blue); cursor: pointer; margin-left: 4px; position: relative;
+}
+.lmot-chip.unmapped { background: transparent; color: var(--muted); border-style: dashed; }
+.lmot-chip.unreachable { background: rgba(255,180,60,0.10); color: var(--amber); border-color: var(--amber); }
+.lmot-popover {
+  position: absolute; top: calc(100% + 4px); left: 0;
+  min-width: 220px; max-width: 320px; background: var(--surface);
+  border: 1px solid var(--border2); border-radius: 6px; padding: 8px 10px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.4); z-index: 100; font-size: 11px;
+  white-space: normal; cursor: default;
+}
+.lmot-popover .lmot-popover-head { color: var(--muted); font-weight: bold; margin-bottom: 4px; }
+.lmot-popover .lmot-doc { display: block; padding: 2px 0; color: var(--text); word-break: break-all; }
+.lmot-popover a {
+  display: block; color: var(--blue); text-decoration: none;
+  padding-top: 4px; margin-top: 4px; border-top: 1px solid var(--border2);
+}
+.lmot-popover a:hover { text-decoration: underline; }
 .sit-header { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px 8px; cursor: pointer; }
 .sit-score  { font-family: var(--display); font-size: 18px; font-weight: 700; min-width: 36px; text-align: center; line-height: 1; padding-top: 2px; flex-shrink: 0; }
 .score-critical .sit-score { color: var(--red); }
@@ -1505,7 +1529,7 @@ tr.attn-low  { opacity:0.65; }
       <div class="field">
         <label>Projects</label>
         <div class="project-row-head" id="project-list-head" style="display:none">
-          <span>Name / Parent</span><span>Description</span><span>Keywords</span><span>Senders</span><span></span>
+          <span>Name / Parent</span><span>Description</span><span>Keywords</span><span>Senders</span><span>lancellmot</span><span></span>
         </div>
         <div id="project-list"></div>
         <button class="connect-btn" style="margin-top:6px" onclick="addProjectRow()">+ Add Project</button>
@@ -3101,6 +3125,107 @@ function renderSituations(situations) {
     return;
   }
   el.innerHTML = visible.map(s => situationCard(s)).join('');
+  hydrateLancellmotChips();
+}
+
+// After situation cards render, fill each card's lancellmot chip host. Each
+// project tag fetches /lancellmot/docs-for-tag and resolves to one of three
+// chip states: resolved (doc count + hover popover), unmapped ("Map →" →
+// Settings), or unreachable (amber, click to retry). Hosts are hydrated once
+// per render via a data-flag guard (parsival#43).
+function hydrateLancellmotChips() {
+  document.querySelectorAll('.lmot-chip-host').forEach(host => {
+    if (host.dataset.hydrated) return;
+    host.dataset.hydrated = '1';
+    let tags = [];
+    try { tags = JSON.parse(host.dataset.tags || '[]'); } catch (_) {}
+    renderLancellmotChips(host, tags);
+  });
+}
+
+async function renderLancellmotChips(host, tags) {
+  host.innerHTML = '';
+  for (const tag of tags) {
+    const chip = document.createElement('span');
+    chip.className = 'lmot-chip';
+    chip.textContent = tag + ' · …';
+    host.appendChild(chip);
+    let body;
+    try {
+      body = await api('/lancellmot/docs-for-tag?tag=' + encodeURIComponent(tag));
+    } catch (_) {
+      _setChipUnreachable(chip, tag, host, tags);
+      continue;
+    }
+    if (body.status === 'ok') {
+      const n = body.docs.length;
+      chip.textContent = tag + ' · ' + n + ' doc' + (n === 1 ? '' : 's');
+      chip.title = 'Related documents in lancellmot';
+      chip.onmouseenter = () => showLancellmotPopover(chip, body);
+      chip.onmouseleave = () => hideLancellmotPopover(chip);
+      chip.onclick = (e) => e.stopPropagation();
+    } else if (body.status === 'unmapped') {
+      chip.classList.add('unmapped');
+      chip.textContent = tag + ' · Map →';
+      chip.title = 'No lancellmot mapping yet — click to map';
+      chip.onclick = (e) => { e.stopPropagation(); openSettingsFocusedOn(tag); };
+    } else {
+      _setChipUnreachable(chip, tag, host, tags);
+    }
+  }
+}
+
+function _setChipUnreachable(chip, tag, host, tags) {
+  chip.className = 'lmot-chip unreachable';
+  chip.textContent = tag + ' · ⚠ unreachable';
+  chip.title = "Couldn't reach lancellmot — click to retry";
+  chip.onclick = (e) => {
+    e.stopPropagation();
+    host.dataset.hydrated = '';
+    renderLancellmotChips(host, tags);
+  };
+}
+
+function showLancellmotPopover(chip, body) {
+  hideLancellmotPopover(chip);
+  const pop = document.createElement('div');
+  pop.className = 'lmot-popover';
+  pop.onclick = (e) => e.stopPropagation();
+  const head = document.createElement('div');
+  head.className = 'lmot-popover-head';
+  head.textContent = body.project_name;
+  pop.appendChild(head);
+  if (!body.docs.length) {
+    const empty = document.createElement('div');
+    empty.className = 'lmot-doc';
+    empty.style.color = 'var(--muted)';
+    empty.textContent = 'No documents';
+    pop.appendChild(empty);
+  } else {
+    for (const d of body.docs) {
+      const docEl = document.createElement('div');
+      docEl.className = 'lmot-doc';
+      docEl.textContent = d.filename || d.title || d.id;
+      pop.appendChild(docEl);
+    }
+  }
+  // Deep-linking into lancellmot's doc viewer is gated behind an explicit
+  // browser-facing URL; only render the link when one is configured so we
+  // never ship a chip that points at a non-existent route.
+  if (window.LANCELLMOT_WEB_URL) {
+    const link = document.createElement('a');
+    link.href = window.LANCELLMOT_WEB_URL;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = 'Open lancellmot →';
+    pop.appendChild(link);
+  }
+  chip.appendChild(pop);
+}
+
+function hideLancellmotPopover(chip) {
+  const ex = chip.querySelector('.lmot-popover');
+  if (ex) ex.remove();
 }
 
 function situationCard(s) {
@@ -3111,6 +3236,10 @@ function situationCard(s) {
   ).join('');
   const priLabel    = `<span class="badge b-${s.priority||'low'}">${s.priority||'low'}</span>`;
   const projLabel   = projBadges(s);
+  const lmotTags    = parseTags(s.project_tag);
+  const lmotHost    = lmotTags.length
+    ? `<span class="lmot-chip-host" data-tags="${esc(JSON.stringify(lmotTags))}"></span>`
+    : '';
   const statusLabel = `<span class="sit-detail-status status-${s.status||'informational'}">${(s.status||'informational').replace('_',' ')}</span>`;
   const actions     = (s.open_actions||[]).filter(a => a.owner === 'me' || a.owner === 'Me');
   const actLine     = actions.length
@@ -3162,7 +3291,7 @@ function situationCard(s) {
           <div class="sit-summary">${esc(s.summary)}</div>
           <div class="sit-meta">
             <div class="sit-src-dots">${srcDots}</div>
-            ${priLabel}${projLabel}${statusLabel}
+            ${priLabel}${projLabel}${lmotHost}${statusLabel}
             ${lcDropdown}${followUpField}
             <span style="font-size:10px;color:var(--muted)">${s.item_count} item${s.item_count!==1?'s':''}</span>
             ${actLine}
@@ -4471,6 +4600,31 @@ function closeSettings() {
   _removeSecretFields();
 }
 
+// Open Settings and bring the matching project row into view, focused on its
+// lancellmot dropdown, so an unmapped chip is one click from being mapped.
+// Project rows load asynchronously, so we poll briefly for the row to appear.
+function openSettingsFocusedOn(parsivalProject) {
+  openSettings();
+  let tries = 0;
+  const seek = () => {
+    const rows = document.querySelectorAll('#project-list .project-row');
+    for (const row of rows) {
+      const name = (row.querySelector('.proj-name') || {}).value || '';
+      if (name === parsivalProject) {
+        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const sel = row.querySelector('.lmot-select');
+        if (sel) sel.focus();
+        row.style.transition = 'background 0.6s';
+        row.style.background = 'rgba(64,184,255,0.12)';
+        setTimeout(() => { row.style.background = ''; }, 1400);
+        return;
+      }
+    }
+    if (++tries < 12) setTimeout(seek, 150);
+  };
+  setTimeout(seek, 150);
+}
+
 const SCHEDULE_SOURCES  = ['slack','github','jira','outlook','teams'];
 const SCHEDULE_OPTIONS  = [
   { label: 'Off',   value: 0   },
@@ -4980,13 +5134,18 @@ function addProjectRow(p = {}) {
     <textarea class="proj-desc" placeholder="Short description of scope, location, or purpose…">${esc(p.description || '')}</textarea>
     <input type="text" class="proj-kw" placeholder="alpha, PA-" value="${esc((p.keywords || []).join(', '))}">
     <input type="text" class="proj-senders" placeholder="jane@co.com, John Smith" value="${esc((p.senders || []).join(', '))}">
+    <select class="lmot-select" title="Map this project to a lancellmot project">
+      <option value="">— none —</option>
+    </select>
     <button class="ia del" onclick="removeProjectRow(this)" title="Remove">✕</button>
     <div class="learned-panel" style="display:none"></div>`;
 
   // Store parent value for after dropdown is populated
   row.dataset.parentVal = parentVal;
+  row.dataset.projectName = p.name || '';
   list.appendChild(row);
   _refreshParentDropdowns();
+  if (!_loadingProjects) populateLancellmotDropdowns();
 }
 
 function _refreshParentDropdowns() {
@@ -5101,10 +5260,87 @@ function readProjects() {
   }).filter(p => p.name);
 }
 
+let _loadingProjects = false;
+
 function loadProjects(projects) {
   $('project-list').innerHTML = '';
   $('project-list-head').style.display = 'none';
+  _loadingProjects = true;
   (projects || []).forEach(p => addProjectRow(p));
+  _loadingProjects = false;
+  populateLancellmotDropdowns();
+}
+
+// Populate every project row's lancellmot dropdown from /lancellmot/projects
+// and select the current alias for each. If lancellmot is unreachable the
+// dropdown disables itself with a visible "unreachable" option rather than
+// silently rendering empty (parsival#43).
+async function populateLancellmotDropdowns() {
+  let projects = null;
+  try {
+    const r = await fetch(API + '/lancellmot/projects');
+    if (!r.ok) throw new Error('unreachable');
+    projects = await r.json();
+  } catch (_) {
+    projects = null;
+  }
+  let aliases = [];
+  try { aliases = await api('/lancellmot/aliases'); } catch (_) {}
+  const aliasByTag = {};
+  for (const a of aliases) aliasByTag[a.parsival_project] = a;
+
+  document.querySelectorAll('.lmot-select').forEach(sel => {
+    const row = sel.closest('.project-row');
+    const parsivalProj = (row && (row.querySelector('.proj-name') || {}).value) || '';
+    sel.innerHTML = '';
+    const none = document.createElement('option');
+    none.value = '';
+    none.textContent = '— none —';
+    sel.appendChild(none);
+    if (projects === null) {
+      sel.disabled = true;
+      const err = document.createElement('option');
+      err.textContent = 'lancellmot unreachable';
+      err.disabled = true;
+      sel.appendChild(err);
+      return;
+    }
+    sel.disabled = false;
+    for (const p of projects) {
+      const o = document.createElement('option');
+      o.value = p.id;
+      o.textContent = p.name;
+      o.dataset.name = p.name;
+      sel.appendChild(o);
+    }
+    const current = aliasByTag[parsivalProj];
+    if (current) sel.value = current.lancellmot_project_id;
+    if (!sel.dataset.wired) {
+      sel.dataset.wired = '1';
+      sel.addEventListener('change', () => onLancellmotSelectChange(sel));
+    }
+  });
+}
+
+async function onLancellmotSelectChange(sel) {
+  const row = sel.closest('.project-row');
+  const parsivalProj = ((row && (row.querySelector('.proj-name') || {}).value) || '').trim();
+  if (!parsivalProj) return;
+  if (sel.value === '') {
+    try {
+      await fetch(API + '/lancellmot/aliases/' + encodeURIComponent(parsivalProj),
+                  { method: 'DELETE' });
+    } catch (_) {}
+    return;
+  }
+  const picked = sel.options[sel.selectedIndex];
+  try {
+    await api('/lancellmot/aliases', 'PUT', {
+      parsival_project: parsivalProj,
+      lancellmot_project_id: sel.value,
+      lancellmot_project_name: picked.dataset.name || picked.textContent,
+    });
+  } catch (_) {}
 }
 
 async function clearNoiseFilter() {

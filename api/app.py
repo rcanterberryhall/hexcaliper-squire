@@ -55,11 +55,13 @@ from typing import Optional
 import requests as http_requests
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import config
 import crypto
 import db
+import lancellmot_client
 from agent import extract_keywords, extract_emails, resolve_owner_email, generate_project_briefing
 from models import RawItem, Analysis
 import contacts as _contacts
@@ -4032,3 +4034,71 @@ def lookahead_reject_suggestion(suggestion_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="suggestion not found")
     return row
+
+
+# ── lancellmot document linking (parsival#43) ────────────────────────────────────
+
+@app.get("/lancellmot/aliases")
+def list_lancellmot_aliases_route():
+    """List all parsival-project → lancellmot-project aliases (Settings audit)."""
+    with db.lock:
+        return db.list_lancellmot_aliases()
+
+
+@app.put("/lancellmot/aliases")
+def put_lancellmot_alias(payload: dict):
+    """Upsert a single project-tag → lancellmot-project alias."""
+    try:
+        parsival = payload["parsival_project"]
+        lid = payload["lancellmot_project_id"]
+        lname = payload["lancellmot_project_name"]
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=f"missing field: {exc}")
+    with db.lock:
+        db.upsert_lancellmot_alias(parsival, lid, lname)
+    return {"ok": True}
+
+
+@app.delete("/lancellmot/aliases/{parsival_project}")
+def delete_lancellmot_alias_route(parsival_project: str):
+    """Remove a project-tag alias."""
+    with db.lock:
+        db.delete_lancellmot_alias(parsival_project)
+    return {"ok": True}
+
+
+@app.get("/lancellmot/projects")
+def get_lancellmot_projects():
+    """Proxy lancellmot's project list (populates the Settings dropdown)."""
+    try:
+        return lancellmot_client.list_projects()
+    except lancellmot_client.LancellmotUnavailable:
+        return JSONResponse(status_code=503, content={"error": "unreachable"})
+
+
+@app.get("/lancellmot/docs-for-tag")
+def docs_for_tag(tag: str, limit: int = 5):
+    """Resolve a project tag to its lancellmot documents for the card chip.
+
+    Returns one of three shapes the UI renders as distinct chip states:
+    ``ok`` (resolved, with docs), ``unmapped`` (no alias), or ``unreachable``
+    (lancellmot down). The DB lookup holds ``db.lock``; the network call does
+    not, so a slow lancellmot never blocks other DB work.
+    """
+    with db.lock:
+        alias = db.get_lancellmot_alias_for_tag(tag)
+    if alias is None:
+        return {"status": "unmapped", "tag": tag}
+    try:
+        docs = lancellmot_client.list_documents(
+            alias["lancellmot_project_id"], limit=limit
+        )
+    except lancellmot_client.LancellmotUnavailable:
+        return {"status": "unreachable", "tag": tag}
+    return {
+        "status": "ok",
+        "tag": tag,
+        "project_id": alias["lancellmot_project_id"],
+        "project_name": alias["lancellmot_project_name"],
+        "docs": docs,
+    }

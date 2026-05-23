@@ -21,6 +21,7 @@ services:
       PYTHONUNBUFFERED:  "1"
       OLLAMA_URL:       "http://host.docker.internal:11400/api/generate"
       MERLLM_URL:       "http://host.docker.internal:11400"
+      LANCELLMOT_URL:   "http://host.docker.internal:8080"
       OLLAMA_MODEL:     "qwen3:32b"
       CF_CLIENT_ID:     ""
       CF_CLIENT_SECRET: ""

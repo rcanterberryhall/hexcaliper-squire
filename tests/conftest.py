@@ -39,6 +39,7 @@ def clear_db():
     import db as _db
     _db.conn().execute("DELETE FROM contact_emails")
     _db.conn().execute("DELETE FROM contacts")
+    _db.conn().execute("DELETE FROM lancellmot_aliases")
     config.PROJECTS = []
     config.FOCUS_TOPICS = []
     config.NOISE_KEYWORDS = []

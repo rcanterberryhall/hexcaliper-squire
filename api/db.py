@@ -245,6 +245,19 @@ def _migrate_schema(c: sqlite3.Connection) -> None:
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_slack_seen_chan ON slack_seen_messages(channel_id)")
 
+    # Explicit project-tag → lancellmot-project mapping (parsival#43).  Strict
+    # alias table, no fuzzy matching: each parsival project name is hand-mapped
+    # to a lancellmot project so situation cards can surface related documents.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS lancellmot_aliases (
+            parsival_project          TEXT PRIMARY KEY,
+            lancellmot_project_id     TEXT NOT NULL,
+            lancellmot_project_name   TEXT NOT NULL,
+            created_at                TEXT NOT NULL,
+            updated_at                TEXT NOT NULL
+        )
+    """)
+
 
 def _create_schema(c: sqlite3.Connection) -> None:
     """Create all tables and indexes if they do not already exist."""
@@ -1154,6 +1167,58 @@ def set_model_state(key: str, value: dict) -> None:
         "INSERT INTO model_state (key, value) VALUES (?,?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (key, json.dumps(value)),
+    )
+
+
+# ── lancellmot project aliases (parsival#43) ─────────────────────────────────────
+
+def upsert_lancellmot_alias(
+    parsival_project: str,
+    lancellmot_project_id: str,
+    lancellmot_project_name: str,
+) -> None:
+    """Create or update the lancellmot mapping for a parsival project name."""
+    now = _now_iso()
+    conn().execute(
+        "INSERT INTO lancellmot_aliases "
+        "(parsival_project, lancellmot_project_id, lancellmot_project_name, "
+        " created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(parsival_project) DO UPDATE SET "
+        "  lancellmot_project_id = excluded.lancellmot_project_id, "
+        "  lancellmot_project_name = excluded.lancellmot_project_name, "
+        "  updated_at = excluded.updated_at",
+        (parsival_project, lancellmot_project_id, lancellmot_project_name, now, now),
+    )
+
+
+def get_lancellmot_alias_for_tag(parsival_project: str) -> Optional[dict]:
+    """Return the alias row for a project name, or None if unmapped."""
+    row = conn().execute(
+        "SELECT parsival_project, lancellmot_project_id, lancellmot_project_name, "
+        "       created_at, updated_at "
+        "FROM lancellmot_aliases WHERE parsival_project = ?",
+        (parsival_project,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_lancellmot_aliases() -> list[dict]:
+    """Return all alias rows ordered by parsival project name."""
+    rows = conn().execute(
+        "SELECT parsival_project, lancellmot_project_id, lancellmot_project_name, "
+        "       created_at, updated_at "
+        "FROM lancellmot_aliases "
+        "ORDER BY parsival_project"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_lancellmot_alias(parsival_project: str) -> None:
+    """Remove the alias for a project name; a no-op if it does not exist."""
+    conn().execute(
+        "DELETE FROM lancellmot_aliases WHERE parsival_project = ?",
+        (parsival_project,),
     )
 
 
